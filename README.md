@@ -1,6 +1,6 @@
-# Manic Mouse
+# Sonic Stick
 
-A mini implementation of some concepts of Laurie Spiegel's [Music Mouse](https: //en.wikipedia.org/wiki/Music_Mouse), for C64. 
+A mini implementation of some concepts of Laurie Spiegel's [Music Mouse](https: //en.wikipedia.org/wiki/Music_Mouse), for C64.
 
 Primarily a learning exercise (LLM-assisted, tbc) to become more familiar with 6502 assembly, the SID chip, and the design of the early versions of Music Mouse. It's a combination of how I thought Music Mouse worked, how it actually worked, and a couple C64 specific things like a filter, chording via arpeggio, and a scale derived from Stockhausen's Studie II, in case you prefer music that doesn't sound good.
 
@@ -17,17 +17,21 @@ Currently uses joystick, which gives no way to detect speed. As such, chords are
 
 ### Keyboard
 
-| Key   | Action                               |
-|-------|--------------------------------------|
-| Space | Toggle sound on/off                  |
-| S     | Cycle scale                          |
-| W     | Cycle waveform                       |
-| < / > | Octave down / up (all voices)        |
-| , / . | Filter cutoff down / up              |
-| F     | Toggle filter                        |
-| R     | Toggle envelope retrigger            |
-| A     | Toggle 4th voice arpeggio            |
-| C     | Toggle contrary motion               |
+| Key         | Action                               |
+|-------------|--------------------------------------|
+| Space       | Toggle sound on/off                  |
+| S           | Cycle scale                          |
+| W           | Cycle waveform                       |
+| < / >       | Octave down / up (all voices)        |
+| , / .       | Filter cutoff down / up              |
+| F           | Toggle filter                        |
+| R           | Toggle envelope retrigger            |
+| C           | Toggle contrary motion               |
+| F1          | Rhythm: chord (all voices together)  |
+| F3          | Rhythm: arpeggiate (rapid cycling)   |
+| F5          | Rhythm: line (one voice per beat)    |
+| F7          | Rhythm: improvise (random voices)    |
+| + / -       | Tempo faster / slower                |
 
 ### Scales
 
@@ -50,10 +54,23 @@ The screen is a 2D pitch space. Three SID voices are harmonically linked:
 
 With **contrary motion** (C key), V2 reverses its pitch direction while V3/V4 stay normal, causing voices to diverge.
 
+### Rhythmic Treatments
+
+Inspired by Music Mouse's four temporal distributions of a chord:
+
+| Mode       | Key | Behavior                                              |
+|------------|-----|-------------------------------------------------------|
+| Chord      | F1  | All voices sound simultaneously (default)             |
+| Arpeggiate | F3  | Voices cycle one at a time, tempo subdivided by 3     |
+| Line       | F5  | One voice per full beat at current tempo              |
+| Improvise  | F7  | Random subsets of voices on each beat                 |
+
+Tempo is adjustable with `+` (faster) and `-` (slower). The current mode is shown at the top-right corner of the screen (C/A/L/I).
+
 ## Build
 
 Built with [64tass](https://tass64.sourceforge.net):
 
 ```
-64tass --cbm-prg -o mm.prg mm.tass
+64tass --cbm-prg -o sstick.prg sstick.tass
 ```
