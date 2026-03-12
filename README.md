@@ -21,9 +21,9 @@ Notes:
 | Key   | Action                               |
 |-------|--------------------------------------|
 | Space | Toggle sound on/off                  |
-| 1-7   | Select scale                         |
+| S     | Cycle scale                          |
 | W     | Cycle waveform                       |
-| Q / E | Voice 3 octave down / up             |
+| < / > | Octave down / up (all voices)        |
 | , / . | Filter cutoff down / up              |
 | F     | Toggle filter                        |
 | R     | Toggle envelope retrigger            |
@@ -32,15 +32,7 @@ Notes:
 
 ### Scales
 
-| Key | Scale          |
-|-----|----------------|
-| 1   | Chromatic      |
-| 2   | Major          |
-| 3   | Minor          |
-| 4   | Pentatonic     |
-| 5   | Wholetone      |
-| 6   | Dorian         |
-| 7   | Minor Penta    |
+Cycled with S: chromatic, major, minor, pentatonic, wholetone, dorian, minor pentatonic.
 
 ### Waveforms
 
@@ -57,7 +49,7 @@ The screen is a 2D pitch space. Three SID voices are harmonically linked:
 | V3    | Y + scale-degree offset (a fifth)               |
 | V4    | Y + scale-degree offset (a third), via arpeggio |
 
-With **contrary motion** (D key), V2/V3/V4 move in the same direction as Y instead of inverting it.
+With **contrary motion** (C key), V2 reverses its pitch direction while V3/V4 stay normal, causing voices to diverge.
 
 ## Build
 
