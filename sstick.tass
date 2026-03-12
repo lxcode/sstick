@@ -233,14 +233,18 @@ irq_handler
         jsr apply_rhythm
         jmp _irq_sid
 _irq_mute
+        ; retrig on: let percussive envelope decay naturally (just stop gating new notes)
+        lda retrig
+        bne _irq_sid
+        ; retrig off: sustained ADSR would drone forever, so gate off
         ldx wave_idx
-        lda wave_cr,x           ; gate off (no gate bit)
+        lda wave_cr,x
         sta V1_CR
         sta V2_CR
         sta V3_CR
         lda #$00
         sta voice_mask
-        lda filt_cut            ; keep filter primed for release
+        lda filt_cut
         sta filt_cur
 _irq_sid
         jsr set_sid_filter
