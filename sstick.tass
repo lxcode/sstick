@@ -1736,10 +1736,10 @@ _blink_done
         rts
 
 ; =====================================================================
-; DRAW PIANO KEYBOARD INDICATORS ON BOTH AXES
+; DRAW NOTE LABELS ON BOTH AXES
 ; =====================================================================
-; X-axis: row 1 (40 columns), each column = one scale degree for V1
-; Y-axis: column 0 (23 rows), each row = one scale degree for V2
+; X-axis: row 24 (bottom), each column = one scale degree for V1
+; Y-axis: column 39 (right edge), each row = one scale degree for V2
 draw_keyboards
         ; studie II: no note labels (non-12TET)
         lda cur_scale
