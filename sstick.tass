@@ -61,6 +61,7 @@ voice_mask  = $23      ; bitmask of currently gated voices (bits 0-2), set by ap
 frame_flag  = $24      ; set by IRQ, cleared by main loop
 on_beat     = $25      ; set by apply_rhythm on beat tick frames
 moving      = $26      ; 1 if cursor moved since last beat tick
+blink_tmr   = $27      ; frames remaining for voice blink (white flash)
 ptr_lo      = $fb      ; indirect pointer lo
 ptr_hi      = $fc      ; indirect pointer hi
 prev_x      = $fd      ; previous cursor X (for erase)
@@ -687,6 +688,8 @@ _ar_beat_fire
 _ar_beat_play
         ; signal freq update and reset filter envelope
         inc on_beat
+        lda #6
+        sta blink_tmr           ; ~120ms white flash
         lda filt_cut
         sta filt_cur
         lda #0
@@ -752,6 +755,9 @@ _ar_d3adv
 
 _ar_beat_advance
         ; advance counters/voices without gating (cursor stationary)
+        lda #0
+        sta voice_mask
+        sta blink_tmr
         lda rhy_mode
         cmp #1
         beq _ar_adv_arp
@@ -789,6 +795,14 @@ _ar_adv_done
         rts
 
 _ar_hold
+        ; decay blink timer; clear voice_mask when expired
+        lda blink_tmr
+        beq _ar_hold_dim
+        dec blink_tmr
+        rts
+_ar_hold_dim
+        lda #0
+        sta voice_mask
         rts
 
 _ar_apply
@@ -1623,11 +1637,11 @@ _skip_draw
         sta prev_v4scr
 
         ; === voice blink: brighten active voices to white ===
-        ; in chord mode (voice_mask=$07) all stay normal; skip blink
-        lda voice_mask
-        cmp #$07
+        ; blink_tmr > 0 means we're in the flash window after a note attack
+        lda blink_tmr
         bne _blink_go
-        jmp _blink_done
+        ; timer expired: restore all lines to normal colors
+        jmp _blink_dim_all
 _blink_go
 
         ; V1 (bit 0): vertical line color
@@ -1715,10 +1729,14 @@ _v3_dim lda v3_scr
 _blink_v4
         ; V4 (shares V3 gate, bit 2): horizontal line at v4_scr+2
         lda arp_on
-        beq _blink_done
+        bne _blink_v4_on
+        jmp _blink_done
+_blink_v4_on
         lda v4_scr
         cmp #$ff
-        beq _blink_done
+        bne _blink_v4_vis
+        jmp _blink_done
+_blink_v4_vis
         lda voice_mask
         lsr a
         lsr a
@@ -1750,6 +1768,55 @@ _v4_dim lda v4_scr
         lda #$04                ; purple (normal V4 color)
         jsr hline_fill
 
+_blink_dim_all
+        ; restore all crosshair lines to normal colors
+        ldy pos_x
+        lda #$0e                ; V1: light blue
+        jsr vline_colr
+        lda pos_y
+        clc
+        adc #2
+        tax
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        clc
+        adc #($d8-$04)
+        sta ptr_hi
+        lda #$0d                ; V2: light green
+        jsr hline_fill
+        lda v3_scr
+        cmp #$ff
+        beq _dim_v4
+        lda v3_scr
+        clc
+        adc #2
+        tax
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        clc
+        adc #($d8-$04)
+        sta ptr_hi
+        lda #$07                ; V3: yellow
+        jsr hline_fill
+_dim_v4 lda arp_on
+        beq _blink_done
+        lda v4_scr
+        cmp #$ff
+        beq _blink_done
+        lda v4_scr
+        clc
+        adc #2
+        tax
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        clc
+        adc #($d8-$04)
+        sta ptr_hi
+        lda #$04                ; V4: purple
+        jsr hline_fill
 _blink_done
         rts
 
