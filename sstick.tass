@@ -59,6 +59,8 @@ lfsr        = $21      ; 8-bit LFSR state for improvise randomness
 imp_mask    = $22      ; bitmask of active voices for improvise (bits 0-2)
 voice_mask  = $23      ; bitmask of currently gated voices (bits 0-2), set by apply_rhythm
 frame_flag  = $24      ; set by IRQ, cleared by main loop
+on_beat     = $25      ; set by apply_rhythm on beat tick frames
+moving      = $26      ; 1 if cursor moved since last beat tick
 ptr_lo      = $fb      ; indirect pointer lo
 ptr_hi      = $fc      ; indirect pointer hi
 prev_x      = $fd      ; previous cursor X (for erase)
@@ -148,7 +150,6 @@ entry
         sta v3_oct
         sta filt_on
         sta retrig
-        sta rt_count
         sta filt_cur
         sta arp_tog
         sta contrary
@@ -176,6 +177,8 @@ entry
 
         lda #0
         sta frame_flag
+        lda #1
+        sta on_beat
 
         jsr sid_init
         jsr draw_header
@@ -224,18 +227,18 @@ irq_handler
         sta VIC_IRR             ; ack raster IRQ
 
         jsr read_joystick
-        jsr quantize
-        jsr set_sid_freq
+        lda #0
+        sta on_beat
         ; fire button = temp mute (bit 4 of joy_raw, active low)
         lda joy_raw
         and #$10
         beq _irq_mute
         jsr apply_rhythm
-        jmp _irq_sid
+        jmp _irq_freq
 _irq_mute
         ; retrig on: let percussive envelope decay naturally (just stop gating new notes)
         lda retrig
-        bne _irq_sid
+        bne _irq_freq
         ; retrig off: sustained ADSR would drone forever, so gate off
         ldx wave_idx
         lda wave_cr,x
@@ -246,7 +249,15 @@ _irq_mute
         sta voice_mask
         lda filt_cut
         sta filt_cur
-_irq_sid
+_irq_freq
+        ; only update pitches on beat ticks (or retrig completion)
+        lda on_beat
+        beq _irq_filt
+        jsr quantize
+        jsr set_sid_freq
+        ; V3 arp toggle runs every frame for rapid alternation
+        jsr update_v3_arp
+_irq_filt
         jsr set_sid_filter
         inc frame_flag          ; signal main loop
 
@@ -321,6 +332,8 @@ _no_right
         cmp prev_y
         beq _joy_done
 _did_move
+        lda #1
+        sta moving
         ; movement rate linked to tempo: tempo/4, minimum 1
         lda tempo
         lsr a
@@ -497,20 +510,28 @@ set_sid_freq
         sta V2_FLO
         sty V2_FHI
 
-        ; voice 3 (with optional arpeggio to voice 4)
+        ; voice 3: set base pitch (arp toggle handled separately every frame)
+        lda v3_note
+        jsr note_to_freq
+        sta V3_FLO
+        sty V3_FHI
+        rts
+
+; --- update V3 frequency for arpeggio toggle (runs every frame) ---
+update_v3_arp
         lda arp_on
-        beq _v3_plain
+        beq _va_done
         lda arp_tog
         eor #$01
         sta arp_tog
-        beq _v3_plain           ; toggle=0: play v3_note
+        beq _va_v3              ; toggle=0: play v3_note
         lda v4_note             ; toggle=1: play v4_note
-        jmp _v3_set
-_v3_plain
-        lda v3_note
-_v3_set jsr note_to_freq
+        jmp _va_set
+_va_v3  lda v3_note
+_va_set jsr note_to_freq
         sta V3_FLO
         sty V3_FHI
+_va_done
         rts
 
 ; --- look up frequency word for note index in A ---
@@ -617,119 +638,30 @@ _gw_off lda #$00
         rts
 
 ; =====================================================================
-; RETRIGGER GATES (2-frame hard restart, matches GoatTracker technique)
-; =====================================================================
-; Gate must be off for 2+ frames with ADSR=$0000 to avoid the SID's
-; ADSR bug (envelope counter wraps and locks up if gate-on happens
-; while counter is near max).
-retrigger_gates
-        ; if countdown active, handle it
-        lda rt_count
-        beq _rt_check
-        dec rt_count
-        bne _rt_done
-        ; countdown reached 0: set percussive ADSR and gate on
-        lda #$09                ; attack=0 (instant), decay=9 (750ms)
-        sta V1_AD
-        sta V2_AD
-        sta V3_AD
-        lda #$00                ; sustain=0, release=0 (full decay to silence)
-        sta V1_SR
-        sta V2_SR
-        sta V3_SR
-        lda filt_cut            ; reset filter envelope to user's cutoff
-        sta filt_cur
-        jsr set_gates
-        rts
-
-_rt_check
-        lda retrig
-        beq _rt_done
-        lda sounding
-        beq _rt_done
-        lda pos_x
-        cmp prev_x
-        bne _rt_do
-        lda pos_y
-        cmp prev_y
-        beq _rt_done
-_rt_do
-        ; ADSR = $0000 (fastest decay on all parameters)
-        lda #$00
-        sta V1_AD
-        sta V2_AD
-        sta V3_AD
-        sta V1_SR
-        sta V2_SR
-        sta V3_SR
-        ; gate off
-        ldx wave_idx
-        lda wave_cr,x
-        sta V1_CR
-        sta V2_CR
-        sta V3_CR
-        ; 2-frame countdown before gate-on
-        lda #2
-        sta rt_count
-_rt_done
-        rts
-
-; =====================================================================
 ; APPLY RHYTHMIC TREATMENT
 ; =====================================================================
-; Dispatches gating based on rhy_mode. In chord mode (0), delegates to
-; retrigger_gates / set_gates as before. In modes 1-3, drives a beat
-; counter that gates individual voices on/off each tick.
+; All modes use beat counting. Pitches only update on beat ticks
+; (on_beat flag), matching original Music Mouse behavior.
+; Retrig (R key) selects percussive vs sustained ADSR.
 apply_rhythm
-        lda rhy_mode
-        bne _ar_rhythmic
-        ; mode 0 (chord): existing behavior
-        jsr retrigger_gates
-        lda rt_count
-        bne _ar_done
-        jsr set_gates
-_ar_done
-        rts
-
-_ar_rhythmic
         ; if sound is off, kill all gates
         lda sounding
-        bne _ar_retrig
+        bne _ar_tick
         jsr gate_all_off
         rts
 
-_ar_retrig
-        ; handle retrigger countdown (same 2-frame gate-off as chord mode)
-        lda rt_count
-        beq _ar_rt_check
-        dec rt_count
-        bne _ar_done            ; still in gate-off period, skip gating
-        ; countdown reached 0: restore percussive ADSR, resume rhythmic gating
-        lda #$09
-        sta V1_AD
-        sta V2_AD
-        sta V3_AD
-        lda #$00
-        sta V1_SR
-        sta V2_SR
-        sta V3_SR
-        lda filt_cut
-        sta filt_cur
-        jmp _ar_apply           ; re-gate via rhythmic pattern
-
-_ar_rt_check
-        ; check if position changed
-        lda pos_x
-        cmp prev_x
-        bne _ar_moved
-        lda pos_y
-        cmp prev_y
-        beq _ar_tick
-_ar_moved
-        ; in improvise mode, redistribute voices on each movement
+_ar_tick
+        ; in improvise mode, redistribute voices on movement
         lda rhy_mode
         cmp #3
-        bne _ar_mv_retrig
+        bne _ar_beat
+        lda pos_x
+        cmp prev_x
+        bne _ar_imp_move
+        lda pos_y
+        cmp prev_y
+        beq _ar_beat
+_ar_imp_move
         jsr lfsr_step
         lda lfsr
         and #$07
@@ -737,46 +669,54 @@ _ar_moved
         lda #$01
 _ar_imp_mv_ok
         sta imp_mask
-        lda tempo
-        sta beat_count
-_ar_mv_retrig
-        ; if retrig enabled, do hard restart
-        lda retrig
-        beq _ar_tick
-_ar_rt_do
-        ; gate off all voices with ADSR=$0000 for hard restart
-        lda #$00
-        sta V1_AD
-        sta V2_AD
-        sta V3_AD
-        sta V1_SR
-        sta V2_SR
-        sta V3_SR
-        jsr gate_all_off
-        ; don't reset beat_voice or beat_count -- let the cycle continue
-        lda #2
-        sta rt_count
-        rts
 
-_ar_tick
+_ar_beat
         ; decrement beat counter
         dec beat_count
-        bne _ar_hold            ; not a beat tick, maintain current gating
-        ; beat tick fired -- reset filter envelope for new voice
+        beq _ar_beat_fire
+        jmp _ar_hold
+_ar_beat_fire
+        ; beat tick fired
+        ; check if cursor is moving; if not, skip note triggering
+        lda moving
+        bne _ar_beat_play
+        ; not moving: in retrig mode, let sound decay (no re-gate)
+        ; in drone mode, sustain current notes (no change)
+        ; still need to advance beat counters
+        jmp _ar_beat_advance
+_ar_beat_play
+        ; signal freq update and reset filter envelope
+        inc on_beat
         lda filt_cut
         sta filt_cur
+        lda #0
+        sta moving              ; consume the movement
+        ; in percussive mode, gate off first to get a fresh 0->1 attack
+        lda retrig
+        beq _ar_no_regate
+        ldx wave_idx
+        lda wave_cr,x
+        sta V1_CR
+        sta V2_CR
+        sta V3_CR
+_ar_no_regate
         lda rhy_mode
         cmp #1
         beq _ar_arp_beat
-        ; line or improvise: reset to full tempo
+        ; chord, line, or improvise: reset to full tempo
         lda tempo
         sta beat_count
         lda rhy_mode
+        beq _ar_chord
         cmp #3
         beq _ar_imp
         ; line: advance beat_voice
         jsr advance_beat_voice
         jmp _ar_apply
+_ar_chord
+        ; chord: gate all voices
+        jsr set_gates
+        rts
 _ar_imp
         ; improvise: step LFSR, use low 3 bits
         jsr lfsr_step
@@ -809,6 +749,44 @@ _ar_d3min
 _ar_d3adv
         jsr advance_beat_voice
         jmp _ar_apply
+
+_ar_beat_advance
+        ; advance counters/voices without gating (cursor stationary)
+        lda rhy_mode
+        cmp #1
+        beq _ar_adv_arp
+        ; chord, line, improvise: reset to full tempo
+        lda tempo
+        sta beat_count
+        lda rhy_mode
+        beq _ar_adv_done
+        cmp #3
+        beq _ar_adv_done
+        ; line: advance beat_voice
+        jsr advance_beat_voice
+        rts
+_ar_adv_arp
+        ; arp: tempo/3
+        lda tempo
+        ldy #0
+_ar_ad3 cmp #3
+        bcc _ar_ad3d
+        sec
+        sbc #3
+        iny
+        jmp _ar_ad3
+_ar_ad3d
+        tya
+        beq _ar_ad3m
+        sta beat_count
+        jmp _ar_adv_v
+_ar_ad3m
+        lda #1
+        sta beat_count
+_ar_adv_v
+        jsr advance_beat_voice
+_ar_adv_done
+        rts
 
 _ar_hold
         rts
@@ -1090,9 +1068,6 @@ _not_f
         sta V3_SR
         rts
 _r_drone
-        ; cancel any pending retrigger countdown
-        lda #0
-        sta rt_count
         ; gate off first so new ADSR triggers a fresh attack
         ldx wave_idx
         lda wave_cr,x
@@ -1131,7 +1106,6 @@ _not_d
         lda #0
         sta rhy_mode
         sta beat_voice
-        sta rt_count
         lda tempo
         sta beat_count
         ; restore sustained ADSR unless retrig is on
@@ -1218,7 +1192,6 @@ _rhy_set
         sta rhy_mode
         lda #0
         sta beat_voice
-        sta rt_count
         lda tempo
         sta beat_count
         ; gate off before changing ADSR to avoid SID envelope latch bug
