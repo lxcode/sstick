@@ -1,6 +1,6 @@
 # Sonic Stick
 
-A mini implementation of some concepts of Laurie Spiegel's [Music Mouse](https: //en.wikipedia.org/wiki/Music_Mouse), for C64.
+A mini implementation of some concepts of Laurie Spiegel's [Music Mouse](https://en.wikipedia.org/wiki/Music_Mouse), for C64.
 
 This was primarily a learning exercise (LLM-assisted) to become more familiar with 6502 assembly, the SID chip, and the design of the early versions of Music Mouse. It's a combination of how I thought Music Mouse worked, how it actually worked, and a couple C64 specific things like a filter, chording via arpeggio, a noise voice and a scale derived from Stockhausen's Studie II, in case you don't like music that sounds nice.
 
