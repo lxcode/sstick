@@ -235,11 +235,11 @@ irq_handler
         and #$10
         beq _irq_mute
         jsr apply_rhythm
-        jmp _irq_freq
+        jmp _irq_post
 _irq_mute
         ; retrig on: let percussive envelope decay naturally (just stop gating new notes)
         lda retrig
-        bne _irq_freq
+        bne _irq_filt
         ; retrig off: sustained ADSR would drone forever, so gate off
         ldx wave_idx
         lda wave_cr,x
@@ -250,13 +250,10 @@ _irq_mute
         sta voice_mask
         lda filt_cut
         sta filt_cur
-_irq_freq
-        ; only update pitches on beat ticks (or retrig completion)
+_irq_post
+        ; V3 arp toggle runs on beat ticks to alternate at tempo rate
         lda on_beat
         beq _irq_filt
-        jsr quantize
-        jsr set_sid_freq
-        ; V3 arp toggle runs every frame for rapid alternation
         jsr update_v3_arp
 _irq_filt
         jsr set_sid_filter
@@ -694,6 +691,9 @@ _ar_beat_play
         sta filt_cur
         lda #0
         sta moving              ; consume the movement
+        ; update pitches before gating so SID has correct frequencies
+        jsr quantize
+        jsr set_sid_freq
         ; in percussive mode, gate off first to get a fresh 0->1 attack
         lda retrig
         beq _ar_no_regate
