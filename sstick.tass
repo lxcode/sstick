@@ -1829,7 +1829,20 @@ _kb_norm
         ldx #0
 _kb_x   txa
         pha                     ; save column
-        ; degree mod scale_len -> step in scale
+        ; apply deg_shift then degree mod scale_len -> step in scale
+        ldy cur_scale
+        pha
+        lda deg_shift,y
+        beq _kb_xns
+        tay
+        pla
+_kb_xsh lsr a
+        dey
+        bne _kb_xsh
+        ldy cur_scale
+        jmp _kb_xd2
+_kb_xns pla
+_kb_xd2
         ldy cur_scale
 _kb_xd  cmp scale_len,y
         bcc _kb_xm
@@ -1869,6 +1882,20 @@ _kb_y   txa
 _kb_ynrm
         txa                     ; A = X
 _kb_ymod
+        ; apply deg_shift (same as degree_to_semi)
+        ldy cur_scale
+        pha
+        lda deg_shift,y
+        beq _kb_yns
+        tay
+        pla
+_kb_ysh lsr a
+        dey
+        bne _kb_ysh
+        ldy cur_scale
+        jmp _kb_yd2
+_kb_yns pla
+_kb_yd2
         ldy cur_scale
 _kb_yd  cmp scale_len,y
         bcc _kb_ym
