@@ -2,9 +2,9 @@
 
 A mini implementation of some concepts of Laurie Spiegel's [Music Mouse](https: //en.wikipedia.org/wiki/Music_Mouse), for C64.
 
-Primarily a learning exercise (LLM-assisted, tbc) to become more familiar with 6502 assembly, the SID chip, and the design of the early versions of Music Mouse. It's a combination of how I thought Music Mouse worked, how it actually worked, and a couple C64 specific things like a filter, chording via arpeggio, and a scale derived from Stockhausen's Studie II, in case you prefer music that doesn't sound good.
+This was primarily a learning exercise (LLM-assisted) to become more familiar with 6502 assembly, the SID chip, and the design of the early versions of Music Mouse. It's a combination of how I thought Music Mouse worked, how it actually worked, and a couple C64 specific things like a filter, chording via arpeggio, a noise voice and a scale derived from Stockhausen's Studie II, in case you don't like music that sounds nice.
 
-Currently uses joystick, which gives no way to detect speed. As such, chords are played sequentially across the grid instead of Music Mouse's intuitive jumps. Koala Pad and 1351 support may be added.
+Currently uses joystick, which gives no way to detect speed. As such, chords are played sequentially across the grid instead of Music Mouse's intuitive jumps. Koala Pad and 1351 support may be added if I end up getting one.
 
 ## Controls
 
@@ -43,7 +43,7 @@ Cycled with W: triangle, sawtooth, pulse, noise.
 
 ### Voices
 
-The screen is a 2D pitch space. Three SID voices are harmonically linked:
+The screen is a 2D pitch space. Three SID voices plus one fake one are harmonically linked:
 
 | Voice | Pitch source                                    |
 |-------|-------------------------------------------------|
@@ -65,7 +65,7 @@ Inspired by Music Mouse's four temporal distributions of a chord:
 | Line       | F5  | One voice per full beat at current tempo              |
 | Improvise  | F7  | Random subsets of voices on each beat                 |
 
-Tempo is adjustable with `+` (faster) and `-` (slower). The current mode is shown at the top-right corner of the screen (C/A/L/I).
+Tempo is adjustable with `+` (faster) and `-` (slower). The current mode is shown at the top-right corner of the screen (CHR/ARP/LIN/IMP).
 
 ## Build
 
