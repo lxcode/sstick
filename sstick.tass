@@ -100,8 +100,6 @@ COLRAM      = $d800
 
 KERNAL_GETIN = $ffe4
 
-; movement speed: cursor advances every N+1 frames when held
-MOVE_RATE   = 4
 
 ; =====================================================================
 ; BASIC autostart: 10 SYS 2061
@@ -286,8 +284,13 @@ _no_right
         cmp prev_y
         beq _joy_done
 _did_move
-        lda #MOVE_RATE
-        sta move_tmr
+        ; movement rate linked to tempo: tempo/4, minimum 1
+        lda tempo
+        lsr a
+        lsr a
+        bne _mr_ok
+        lda #1
+_mr_ok  sta move_tmr
 _joy_done
         rts
 
