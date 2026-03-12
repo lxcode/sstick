@@ -2,11 +2,13 @@
 ; Sonic Stick
 ; Inspired by Laurie Spiegel's "Music Mouse" (1986)
 ;
-; The screen is a 2D pitch space. Joystick position controls 3
-; harmonically-linked SID voices:
+; The screen is a 2D pitch space. Joystick position controls 4
+; harmonically-linked voices (3 SID + 1 arpeggiated):
 ;   Voice 1 pitch derived from X position
 ;   Voice 2 pitch derived from Y position
 ;   Voice 3 pitch derived from Y + scale-degree offset (a fifth)
+;   Voice 4 pitch derived from Y + scale-degree offset (a third),
+;           time-shared with Voice 3 via frame-alternating arpeggio
 ;
 ; Controls:
 ;   Joystick 2    Move through pitch space
@@ -18,7 +20,6 @@
 ;   , / .         Filter cutoff down / up
 ;   F             Toggle filter
 ;   R             Toggle envelope retrigger
-;   A             Toggle 4th voice arpeggio
 ;   C             Toggle contrary motion
 ;   F1/F3/F5/F7   Rhythm: chord / arpeggiate / line / improvise
 ;   + / -         Tempo faster / slower
