@@ -351,7 +351,7 @@ _joy_done
 quantize
         ; studie II: positions are direct indices (no degree_to_semi)
         lda cur_scale
-        cmp #7
+        cmp #8
         bne _q_normal
 
         ; V1 = pos_x clamped to 38
@@ -378,7 +378,7 @@ _qs_v2d sta v2_note
 
         ; V3 = (21-pos_y) + v3_step clamped to 38
         clc
-        adc v3_step+7
+        adc v3_step+8
         cmp #39
         bcc +
         lda #38
@@ -389,7 +389,7 @@ _qs_v2d sta v2_note
         sec
         sbc pos_y
         clc
-        adc v4_step+7
+        adc v4_step+8
         cmp #39
         bcc +
         lda #38
@@ -540,7 +540,7 @@ _va_done
 ; for studie scale, uses studie_freq directly; otherwise apply_oct + freq_tbl
 note_to_freq
         ldx cur_scale
-        cpx #7
+        cpx #8
         beq _ntf_stu
         jsr apply_oct
         asl a
@@ -995,7 +995,7 @@ _not_w
         bne _not_s
         ldx cur_scale
         inx
-        cpx #8
+        cpx #9
         bne _s_ok
         ldx #0
 _s_ok   stx cur_scale
@@ -1828,7 +1828,7 @@ _blink_done
 draw_keyboards
         ; studie II: no note labels (non-12TET)
         lda cur_scale
-        cmp #7
+        cmp #8
         bne _kb_norm
         ; blank X-axis (row 24, cols 0-38)
         ldx #38
@@ -2079,18 +2079,19 @@ sc_penta  .byte 0,2,4,7,9
 sc_whole  .byte 0,2,4,6,8,10
 sc_dorian .byte 0,2,3,5,7,9,10
 sc_mpent  .byte 0,3,5,7,10
+sc_octa   .byte 0,2,3,5,6,8,9,11
 
 scale_len
-        .byte 12, 7, 7, 5, 6, 7, 5, 39  ; studie: unused (bypasses degree_to_semi)
+        .byte 12, 7, 7, 5, 6, 7, 5, 8, 39  ; studie: unused (bypasses degree_to_semi)
 
 ; degree right-shift to normalize pitch range for sparser scales
-;              chrom maj min pent whole dorian mpent stud
-deg_shift .byte 0,   0,  0,  1,   0,    0,    1,    0
+;              chrom maj min pent whole dorian mpent octa stud
+deg_shift .byte 0,   0,  0,  1,   0,    0,    1,    0,   0
 
 ; voice 3 offset in scale degrees (a fifth where possible)
 ; for scales with deg_shift>0, offset must be pre-multiplied to compensate
-;              chrom maj min pent whole dorian mpent stud
-v3_step .byte  7,    4,  4,  6,   3,    4,    6,    6
+;              chrom maj min pent whole dorian mpent octa stud
+v3_step .byte  7,    4,  4,  6,   3,    4,    6,    5,   6
 
 ; note name display: character and color per semitone (0-11)
 ; always show note letter; flats shown as dark version of note above
@@ -2100,16 +2101,18 @@ note_clr .byte $01, $0b, $01, $0b, $01, $01, $0b, $01, $0b, $01, $0b, $01
 
 ; voice 4 offset in scale degrees (a third where possible)
 ; for scales with deg_shift>0, offset must be pre-multiplied to compensate
-;              chrom maj min pent whole dorian mpent stud
-v4_step .byte  4,    2,  2,  4,   2,    2,    4,    4
+;              chrom maj min pent whole dorian mpent octa stud
+v4_step .byte  4,    2,  2,  4,   2,    2,    4,    3,   4
 
 scale_ptr_lo
         .byte <sc_chrom, <sc_major, <sc_minor
         .byte <sc_penta, <sc_whole, <sc_dorian, <sc_mpent
+        .byte <sc_octa
         .byte <sc_chrom              ; dummy (studie bypasses degree_to_semi)
 scale_ptr_hi
         .byte >sc_chrom, >sc_major, >sc_minor
         .byte >sc_penta, >sc_whole, >sc_dorian, >sc_mpent
+        .byte >sc_octa
         .byte >sc_chrom              ; dummy
 
 ; --- scale names (screen codes, $ff terminated, padded to 9 chars) ---
@@ -2127,6 +2130,8 @@ sn_dor  .text "DORIAN   "
         .byte $ff
 sn_mpen .text "MIN PENTA"
         .byte $ff
+sn_octa .text "OCTATONIC"
+        .byte $ff
 sn_stu  .text "STUDIE II"
         .byte $ff
         .enc "none"
@@ -2134,10 +2139,10 @@ sn_stu  .text "STUDIE II"
 
 sname_ptr_lo
         .byte <sn_chr, <sn_maj, <sn_min
-        .byte <sn_pen, <sn_whl, <sn_dor, <sn_mpen, <sn_stu
+        .byte <sn_pen, <sn_whl, <sn_dor, <sn_mpen, <sn_octa, <sn_stu
 sname_ptr_hi
         .byte >sn_chr, >sn_maj, >sn_min
-        .byte >sn_pen, >sn_whl, >sn_dor, >sn_mpen, >sn_stu
+        .byte >sn_pen, >sn_whl, >sn_dor, >sn_mpen, >sn_octa, >sn_stu
 
 ; --- screen row address tables (rows 0-24) ---
 row_lo
