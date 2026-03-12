@@ -727,7 +727,7 @@ _ar_rt_do
 _ar_tick
         ; decrement beat counter
         dec beat_count
-        bne _ar_apply
+        bne _ar_hold            ; not a beat tick, maintain current gating
         ; beat tick fired -- reset filter envelope for new voice
         lda filt_cut
         sta filt_cur
@@ -775,6 +775,9 @@ _ar_d3min
 _ar_d3adv
         jsr advance_beat_voice
         jmp _ar_apply
+
+_ar_hold
+        rts
 
 _ar_apply
         ; apply gating based on mode
