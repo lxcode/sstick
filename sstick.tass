@@ -178,11 +178,17 @@ entry
 ; MAIN LOOP  (synced to raster for ~50/60 Hz)
 ; =====================================================================
 main_loop
+        ; draw while waiting for raster (variable-cost work done here)
+        jsr draw_header
+        jsr draw_crosshairs
+        jsr draw_keyboards
+
         ; wait for raster line 251 (bottom border)
 _wait1  lda VIC_RASTER
         cmp #251
         bne _wait1
 
+        ; timing-critical: SID updates happen immediately after sync
         jsr read_joystick
         jsr quantize
         jsr set_sid_freq
@@ -205,9 +211,6 @@ _fire_mute
 _fire_done
         jsr set_sid_filter
         jsr read_keys
-        jsr draw_header
-        jsr draw_crosshairs
-        jsr draw_keyboards
 
         ; wait until raster leaves line 251 so we don't double-trigger
 _wait2  lda VIC_RASTER
@@ -1338,10 +1341,6 @@ _hdr_rhy
         sta SCREEN+38
         lda rhy_str+2,x
         sta SCREEN+39
-        lda #$03                ; cyan
-        sta COLRAM+37
-        sta COLRAM+38
-        sta COLRAM+39
 
 _hdr_sep
         ; row 1: thin separator
@@ -1358,6 +1357,12 @@ _hcol   sta COLRAM,x
         sta COLRAM+40,x
         dex
         bpl _hcol
+
+        ; rhythm mode color (after header color loop to avoid overwrite)
+        lda #$03                ; cyan
+        sta COLRAM+37
+        sta COLRAM+38
+        sta COLRAM+39
         rts
 
 ; --- draw crosshair lines for all three voices ---
