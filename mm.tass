@@ -25,7 +25,7 @@
 ; ----- zero page variables -----
 pos_x       = $02      ; cursor column (0-39)
 pos_y       = $03      ; cursor row in play area (0-21, maps to screen rows 2-23)
-cur_scale   = $04      ; scale index 0-6
+cur_scale   = $04      ; scale index 0-7
 wave_idx    = $05      ; waveform index 0-3
 sounding    = $06      ; 1 = gates open, 0 = gates closed
 v3_oct      = $07      ; global semitone offset: 0, +12, or -12 (signed)
@@ -275,6 +275,54 @@ _joy_done
 ; QUANTIZE X/Y TO SCALE NOTES
 ; =====================================================================
 quantize
+        ; studie II: positions are direct indices (no degree_to_semi)
+        lda cur_scale
+        cmp #7
+        bne _q_normal
+
+        ; V1 = pos_x clamped to 38
+        lda pos_x
+        cmp #39
+        bcc +
+        lda #38
++       sta v1_note
+
+        ; V2 base: normal = 21-pos_y, contrary = pos_y
+        lda contrary
+        bne _qs_v2c
+        lda #21
+        sec
+        sbc pos_y
+        jmp _qs_v2d
+_qs_v2c lda pos_y
+_qs_v2d sta v2_note
+
+        ; V3/V4 always use inverted Y (matches draw_crosshairs)
+        lda #21
+        sec
+        sbc pos_y
+
+        ; V3 = (21-pos_y) + v3_step clamped to 38
+        clc
+        adc v3_step+7
+        cmp #39
+        bcc +
+        lda #38
++       sta v3_note
+
+        ; V4 = (21-pos_y) + v4_step clamped to 38
+        lda #21
+        sec
+        sbc pos_y
+        clc
+        adc v4_step+7
+        cmp #39
+        bcc +
+        lda #38
++       sta v4_note
+        rts
+
+_q_normal
         ; voice 1: X position (0-39) -> scale degree -> semitone
         lda pos_x
         jsr degree_to_semi
@@ -379,23 +427,15 @@ _semi_ok
 set_sid_freq
         ; voice 1
         lda v1_note
-        jsr apply_oct
-        asl a                   ; *2 for word-sized table lookup
-        tax
-        lda freq_tbl,x
+        jsr note_to_freq
         sta V1_FLO
-        lda freq_tbl+1,x
-        sta V1_FHI
+        sty V1_FHI
 
         ; voice 2
         lda v2_note
-        jsr apply_oct
-        asl a
-        tax
-        lda freq_tbl,x
+        jsr note_to_freq
         sta V2_FLO
-        lda freq_tbl+1,x
-        sta V2_FHI
+        sty V2_FHI
 
         ; voice 3 (with optional arpeggio to voice 4)
         lda arp_on
@@ -408,13 +448,29 @@ set_sid_freq
         jmp _v3_set
 _v3_plain
         lda v3_note
-_v3_set jsr apply_oct
+_v3_set jsr note_to_freq
+        sta V3_FLO
+        sty V3_FHI
+        rts
+
+; --- look up frequency word for note index in A ---
+; output: A = freq lo, Y = freq hi
+; for studie scale, uses studie_freq directly; otherwise apply_oct + freq_tbl
+note_to_freq
+        ldx cur_scale
+        cpx #7
+        beq _ntf_stu
+        jsr apply_oct
         asl a
         tax
         lda freq_tbl,x
-        sta V3_FLO
-        lda freq_tbl+1,x
-        sta V3_FHI
+        ldy freq_tbl+1,x
+        rts
+_ntf_stu
+        asl a
+        tax
+        lda studie_freq,x
+        ldy studie_freq+1,x
         rts
 
 ; --- apply global octave shift and clamp to 0-71 ---
@@ -605,7 +661,7 @@ _not_w
         bne _not_s
         ldx cur_scale
         inx
-        cpx #7
+        cpx #8
         bne _s_ok
         ldx #0
 _s_ok   stx cur_scale
@@ -894,46 +950,56 @@ _hcol   sta COLRAM,x
 ; --- draw crosshair lines for all three voices ---
 draw_crosshairs
         ; compute voice 3 screen row
-        ; normal: pos_y - v3_step (V3 above cursor, moves with it)
-        ; contrary: (21 - pos_y) - v3_step (V3 mirrors, moves opposite)
+        ; normal: pos_y - v3_step (V3 above cursor)
+        ; contrary: (21 - pos_y) + v3_step (V3 below mirror point)
         ldx cur_scale
         lda contrary
         bne _v3_mir
         lda pos_y
-        jmp _v3_sub
+        sec
+        sbc v3_step,x
+        bcc _v3_off             ; underflow = off screen
+        jmp _v3_chk
 _v3_mir lda #21
         sec
         sbc pos_y
-_v3_sub sec
-        sbc v3_step,x
-        bcc _v3_off             ; negative = off screen
-        cmp #22
-        bcs _v3_off             ; > 21 = off screen
+        clc
+        adc v3_step,x
+_v3_chk cmp #22
+        bcs _v3_off             ; >= 22 = off screen
         sta v3_scr
         jmp _v3_done
 _v3_off lda #$ff
         sta v3_scr
 _v3_done
 
-        ; compute voice 4 screen row (same contrary logic)
+        ; compute voice 4 screen row (same logic)
         ldx cur_scale
         lda contrary
         bne _v4_mir
         lda pos_y
-        jmp _v4_sub
+        sec
+        sbc v4_step,x
+        bcc _v4_off
+        jmp _v4_chk
 _v4_mir lda #21
         sec
         sbc pos_y
-_v4_sub sec
-        sbc v4_step,x
-        bcc _v4_off
-        cmp #22
+        clc
+        adc v4_step,x
+_v4_chk cmp #22
         bcs _v4_off
         sta v4_scr
         jmp _v4_done
 _v4_off lda #$ff
         sta v4_scr
 _v4_done
+        ; if arp off, mark v4 invisible so stale line gets erased
+        lda arp_on
+        bne _v4_vis
+        lda #$ff
+        sta v4_scr
+_v4_vis
 
         ; === skip erase/draw if nothing moved ===
         lda pos_x
@@ -964,9 +1030,7 @@ _do_draw
         adc #2                  ; play area offset
         jsr hline_erase
 
-        ; erase old V4 horizontal at prev_v4scr (only if arp on)
-        lda arp_on
-        beq _skip_ev4
+        ; erase old V4 horizontal at prev_v4scr
         lda prev_v4scr
         cmp #$ff
         beq _skip_ev4
@@ -1137,6 +1201,38 @@ _skip_draw
 ; X-axis: row 1 (40 columns), each column = one scale degree for V1
 ; Y-axis: column 0 (23 rows), each row = one scale degree for V2
 draw_keyboards
+        ; studie II: no note labels (non-12TET)
+        lda cur_scale
+        cmp #7
+        bne _kb_norm
+        ; blank X-axis (row 24, cols 0-38)
+        ldx #38
+        lda #$20
+_kb_bx  sta SCREEN+24*40,x
+        lda #$0b
+        sta COLRAM+24*40,x
+        lda #$20
+        dex
+        bpl _kb_bx
+        ; blank Y-axis (col 39, rows 2-23)
+        lda #<(SCREEN+80+39)
+        sta $1b
+        lda #>(SCREEN+80+39)
+        sta $1c
+        ldx #22
+_kb_by  ldy #0
+        lda #$20
+        sta ($1b),y
+        lda $1b
+        clc
+        adc #40
+        sta $1b
+        bcc +
+        inc $1c
++       dex
+        bne _kb_by
+        rts
+_kb_norm
         ; set up scale pointer for note lookups
         ldx cur_scale
         lda scale_ptr_lo,x
@@ -1327,15 +1423,15 @@ sc_dorian .byte 0,2,3,5,7,9,10
 sc_mpent  .byte 0,3,5,7,10
 
 scale_len
-        .byte 12, 7, 7, 5, 6, 7, 5
+        .byte 12, 7, 7, 5, 6, 7, 5, 39  ; studie: unused (bypasses degree_to_semi)
 
 ; degree right-shift to normalize pitch range for sparser scales
-;              chrom maj min pent whole dorian mpent
-deg_shift .byte 0,   0,  0,  1,   0,    0,    1
+;              chrom maj min pent whole dorian mpent stud
+deg_shift .byte 0,   0,  0,  1,   0,    0,    1,    0
 
 ; voice 3 offset in scale degrees (a fifth where possible)
-;              chrom maj min pent whole dorian mpent
-v3_step .byte  7,    4,  4,  3,   3,    4,    3
+;              chrom maj min pent whole dorian mpent stud
+v3_step .byte  7,    4,  4,  3,   3,    4,    3,    6
 
 ; note name display: character and color per semitone (0-11)
 ; always show note letter; flats shown as dark version of note above
@@ -1344,15 +1440,17 @@ note_chr .byte $03, $04, $04, $05, $05, $06, $07, $07, $01, $01, $02, $02
 note_clr .byte $01, $0b, $01, $0b, $01, $01, $0b, $01, $0b, $01, $0b, $01
 
 ; voice 4 offset in scale degrees (a third where possible)
-;              chrom maj min pent whole dorian mpent
-v4_step .byte  4,    2,  2,  1,   2,    2,    1
+;              chrom maj min pent whole dorian mpent stud
+v4_step .byte  4,    2,  2,  1,   2,    2,    1,    4
 
 scale_ptr_lo
         .byte <sc_chrom, <sc_major, <sc_minor
         .byte <sc_penta, <sc_whole, <sc_dorian, <sc_mpent
+        .byte <sc_chrom              ; dummy (studie bypasses degree_to_semi)
 scale_ptr_hi
         .byte >sc_chrom, >sc_major, >sc_minor
         .byte >sc_penta, >sc_whole, >sc_dorian, >sc_mpent
+        .byte >sc_chrom              ; dummy
 
 ; --- scale names (screen codes, $ff terminated, padded to 9 chars) ---
 sn_chr  .text "CHROMATIC"
@@ -1369,15 +1467,17 @@ sn_dor  .text "DORIAN   "
         .byte $ff
 sn_mpen .text "MIN PENTA"
         .byte $ff
+sn_stu  .text "STUDIE II"
+        .byte $ff
         .enc "none"
 
 
 sname_ptr_lo
         .byte <sn_chr, <sn_maj, <sn_min
-        .byte <sn_pen, <sn_whl, <sn_dor, <sn_mpen
+        .byte <sn_pen, <sn_whl, <sn_dor, <sn_mpen, <sn_stu
 sname_ptr_hi
         .byte >sn_chr, >sn_maj, >sn_min
-        .byte >sn_pen, >sn_whl, >sn_dor, >sn_mpen
+        .byte >sn_pen, >sn_whl, >sn_dor, >sn_mpen, >sn_stu
 
 ; --- screen row address tables (rows 0-24) ---
 row_lo
@@ -1423,3 +1523,14 @@ freq_tbl
         ; C-6  C#6  D-6  D#6  E-6  F-6  F#6  G-6  G#6  A-6  A#6  B-6
         .word $45a0,$49c8,$4e28,$52cc,$57b8,$5cf0
         .word $627c,$6854,$6e88,$7520,$7c10,$8370
+
+; --- Studie II frequency table (25 equal divisions of 5:1) ---
+; 39 entries, base = C-2 (65.41 Hz), step ratio = 5^(1/25)
+studie_freq
+        .word $045a,$04a4,$04f3,$0547,$05a1,$0601
+        .word $0667,$06d4,$0748,$07c4,$0848,$08d5
+        .word $096c,$0a0c,$0ab7,$0b6e,$0c30,$0d00
+        .word $0ddd,$0ec9,$0fc4,$10d1,$11ef,$1320
+        .word $1466,$15c1,$1733,$18be,$1a64,$1c25
+        .word $1e04,$2003,$2224,$2469,$26d5,$296a
+        .word $2c2b,$2f1b,$323c

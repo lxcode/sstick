@@ -1,11 +1,10 @@
 # Manic Mouse
 
-A mini implementation of the concepts pioneered by Laurie Spiegel's [Music Mouse](https: //en.wikipedia.org/wiki/Music_Mouse), for C64. Primarily a learning exercise (largely LLM-assisted) for myself to become more familiar with 6502 assembly, the SID chip, and the design of the early versions of Music Mouse.
+A mini implementation of some concepts of Laurie Spiegel's [Music Mouse](https: //en.wikipedia.org/wiki/Music_Mouse), for C64. 
 
-Notes:
+Primarily a learning exercise (LLM-assisted, tbc) to become more familiar with 6502 assembly, the SID chip, and the design of the early versions of Music Mouse. It's a combination of how I thought Music Mouse worked, how it actually worked, and a couple C64 specific things like a filter, chording via arpeggio, and a scale derived from Stockhausen's Studie II, in case you prefer music that doesn't sound good.
 
-* Constrained to 3 voices with an optional 4th via arpeggio, but may add dual SID support for the C64U.
-* Currently uses joystick, which gives no way to detect speed. As such, chords are played sequentially across the grid instead of Music Mouse's intuitive jumps. Koala Pad and 1351 support may be added.
+Currently uses joystick, which gives no way to detect speed. As such, chords are played sequentially across the grid instead of Music Mouse's intuitive jumps. Koala Pad and 1351 support may be added.
 
 ## Controls
 
@@ -32,7 +31,7 @@ Notes:
 
 ### Scales
 
-Cycled with S: chromatic, major, minor, pentatonic, wholetone, dorian, minor pentatonic.
+Cycled with S: chromatic, major, minor, pentatonic, wholetone, dorian, minor pentatonic, studie ii.
 
 ### Waveforms
 
