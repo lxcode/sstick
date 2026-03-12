@@ -1,0 +1,1332 @@
+; =====================================================================
+; Manic Mouse
+; Inspired by Laurie Spiegel's "Music Mouse" (1986)
+;
+; The screen is a 2D pitch space. Joystick position controls 3
+; harmonically-linked SID voices:
+;   Voice 1 pitch derived from X position
+;   Voice 2 pitch derived from Y position
+;   Voice 3 pitch derived from Y + scale-degree offset (a fifth)
+;
+; Controls:
+;   Joystick 2    Move through pitch space
+;   Space         Toggle sound on/off
+;   1-6           Select scale (chromatic/major/minor/pentatonic/wholetone/dorian)
+;   W / S         Cycle waveform forward / backward
+;   Q / E         Voice 3 octave down / up
+;   , / .         Filter cutoff down / up
+;   F             Toggle filter
+;   R             Toggle envelope retrigger
+; =====================================================================
+
+; ----- zero page variables -----
+pos_x       = $02      ; cursor column (0-39)
+pos_y       = $03      ; cursor row in play area (0-22, maps to screen rows 2-24)
+cur_scale   = $04      ; scale index 0-5
+wave_idx    = $05      ; waveform index 0-3
+sounding    = $06      ; 1 = gates open, 0 = gates closed
+v3_oct      = $07      ; voice 3 semitone offset: 0, +12, or -12 (signed)
+filt_on     = $08      ; filter enable flag
+filt_cut    = $09      ; filter cutoff high nybble
+move_tmr    = $0a      ; movement rate limiter
+v1_note     = $0b      ; voice 1 semitone index into freq_table
+v2_note     = $0c      ; voice 2 note
+v3_note     = $0d      ; voice 3 note
+joy_raw     = $0e      ; raw joystick byte
+tmp         = $0f      ; scratch
+v3_scr      = $10      ; voice 3 play-area row (0-22) or $ff if off-screen
+prev_v3scr  = $11      ; previous frame's v3_scr
+retrig      = $12      ; envelope retrigger mode (1=on, 0=off)
+rt_count    = $13      ; frames remaining in gate-off period (0=idle)
+filt_cur    = $14      ; current filter cutoff (decays from filt_cut in retrig mode)
+ptr_lo      = $fb      ; indirect pointer lo
+ptr_hi      = $fc      ; indirect pointer hi
+prev_x      = $fd      ; previous cursor X (for erase)
+prev_y      = $fe      ; previous cursor Y (for erase)
+
+; ----- hardware -----
+SID         = $d400
+V1_FLO      = SID+$00
+V1_FHI      = SID+$01
+V1_PWLO     = SID+$02
+V1_PWHI     = SID+$03
+V1_CR       = SID+$04
+V1_AD       = SID+$05
+V1_SR       = SID+$06
+V2_FLO      = SID+$07
+V2_FHI      = SID+$08
+V2_PWLO     = SID+$09
+V2_PWHI     = SID+$0a
+V2_CR       = SID+$0b
+V2_AD       = SID+$0c
+V2_SR       = SID+$0d
+V3_FLO      = SID+$0e
+V3_FHI      = SID+$0f
+V3_PWLO     = SID+$10
+V3_PWHI     = SID+$11
+V3_CR       = SID+$12
+V3_AD       = SID+$13
+V3_SR       = SID+$14
+FC_LO       = SID+$15
+FC_HI       = SID+$16
+RES_FILT    = SID+$17
+MODE_VOL    = SID+$18
+
+CIA1_PRA    = $dc00
+VIC_RASTER  = $d012
+VIC_BORDER  = $d020
+VIC_BG      = $d021
+SCREEN      = $0400
+COLRAM      = $d800
+
+KERNAL_GETIN = $ffe4
+
+; movement speed: cursor advances every N+1 frames when held
+MOVE_RATE   = 4
+
+; =====================================================================
+; BASIC autostart: 10 SYS 2061
+; =====================================================================
+        * = $0801
+        .word (+), 10           ; pointer to next line, line number
+        .null $9e, "2061"       ; SYS token + address as null-terminated string
++       .word 0                 ; end of BASIC program
+
+; =====================================================================
+; ENTRY POINT
+; =====================================================================
+        * = $080d
+entry
+        sei
+
+        ; -- screen setup --
+        lda #$00
+        sta VIC_BORDER
+        sta VIC_BG
+        jsr clear_screen
+        cli                     ; enable IRQ so KERNAL keyboard scanning works
+        jsr show_intro
+        sei                     ; disable IRQ again for game loop
+        jsr clear_screen
+
+        ; -- init state --
+        lda #20
+        sta pos_x
+        sta prev_x
+        lda #11
+        sta pos_y
+        sta prev_y
+
+        lda #1                  ; major scale
+        sta cur_scale
+        lda #1                  ; sawtooth
+        sta wave_idx
+        lda #1
+        sta sounding
+        lda #0
+        sta v3_oct
+        sta filt_on
+        sta retrig
+        sta rt_count
+        sta filt_cur
+        lda #$50
+        sta filt_cut
+        lda #0
+        sta move_tmr
+        lda #$ff
+        sta prev_v3scr
+
+        jsr sid_init
+        jsr draw_header
+        jsr draw_crosshairs
+
+        cli
+
+; =====================================================================
+; MAIN LOOP  (synced to raster for ~50/60 Hz)
+; =====================================================================
+main_loop
+        ; wait for raster line 251 (bottom border)
+_wait1  lda VIC_RASTER
+        cmp #251
+        bne _wait1
+
+        jsr read_joystick
+        jsr quantize
+        jsr set_sid_freq
+        jsr retrigger_gates
+        jsr set_sid_filter
+        jsr read_keys
+        jsr draw_header
+        jsr draw_crosshairs
+
+        ; wait until raster leaves line 251 so we don't double-trigger
+_wait2  lda VIC_RASTER
+        cmp #251
+        beq _wait2
+
+        jmp main_loop
+
+; =====================================================================
+; READ JOYSTICK PORT 2
+; =====================================================================
+read_joystick
+        ; save previous position for cursor erase
+        lda pos_x
+        sta prev_x
+        lda pos_y
+        sta prev_y
+
+        lda CIA1_PRA
+        sta joy_raw
+
+        ; -- rate limiter for directional movement --
+        lda move_tmr
+        beq _move_ok
+        dec move_tmr
+        rts
+_move_ok
+        lda joy_raw
+
+        ; bit 0 = up (active low) -> decrease Y (higher pitch)
+        lsr a
+        bcs _no_up
+        lda pos_y
+        beq _no_up
+        dec pos_y
+_no_up
+        lda joy_raw
+        ; bit 1 = down
+        lsr a
+        lsr a
+        bcs _no_down
+        lda pos_y
+        cmp #22
+        beq _no_down
+        inc pos_y
+_no_down
+        lda joy_raw
+        ; bit 2 = left
+        lsr a
+        lsr a
+        lsr a
+        bcs _no_left
+        lda pos_x
+        beq _no_left
+        dec pos_x
+_no_left
+        lda joy_raw
+        ; bit 3 = right
+        lsr a
+        lsr a
+        lsr a
+        lsr a
+        bcs _no_right
+        lda pos_x
+        cmp #39
+        beq _no_right
+        inc pos_x
+_no_right
+        ; if position changed, reset movement timer
+        lda pos_x
+        cmp prev_x
+        bne _did_move
+        lda pos_y
+        cmp prev_y
+        beq _joy_done
+_did_move
+        lda #MOVE_RATE
+        sta move_tmr
+_joy_done
+        rts
+
+; =====================================================================
+; QUANTIZE X/Y TO SCALE NOTES
+; =====================================================================
+quantize
+        ; voice 1: X position (0-39) -> scale degree -> semitone
+        lda pos_x
+        jsr degree_to_semi
+        sta v1_note
+
+        ; voice 2: Y position inverted (0=bottom=low, 22=top=high)
+        lda #22
+        sec
+        sbc pos_y
+        jsr degree_to_semi
+        sta v2_note
+
+        ; voice 3: Y position + scale-degree offset (a fifth in most scales)
+        ; This matches Spiegel's original: voice offsets are in scale steps,
+        ; not semitones, so voice 3 is always in-scale.
+        lda #22
+        sec
+        sbc pos_y               ; invert Y (same as voice 2)
+        clc
+        ldx cur_scale
+        adc v3_step,x           ; add per-scale degree offset
+        jsr degree_to_semi      ; quantize through the scale
+        ; apply octave shift and clamp 0-71
+        clc
+        adc v3_oct
+        bpl _v3_pos
+        lda #0
+        jmp _v3_store
+_v3_pos
+        cmp #72
+        bcc _v3_store
+        lda #71
+_v3_store
+        sta v3_note
+        rts
+
+; --- convert a scale degree (0-39) to a semitone index (0-71) ---
+; input:  A = degree
+; output: A = semitone index
+degree_to_semi
+        sta tmp
+
+        ; load pointer to current scale interval table
+        ldx cur_scale
+        lda scale_ptr_lo,x
+        sta ptr_lo
+        lda scale_ptr_hi,x
+        sta ptr_hi
+
+        ; divide degree by scale length -> quotient=octave, remainder=step
+        lda tmp
+        ldx cur_scale
+        ldy #0                  ; octave counter
+_div    cmp scale_len,x
+        bcc _div_done
+        sec
+        sbc scale_len,x
+        iny
+        jmp _div
+_div_done
+        ; A = step within scale, Y = octave
+        sty tmp                 ; save octave
+        tay
+        lda (ptr_lo),y          ; semitone offset for this scale step
+
+        ; add octave * 12
+        ldx tmp
+        beq _no_oct
+_add_oct
+        clc
+        adc #12
+        dex
+        bne _add_oct
+_no_oct
+        ; shift up from C1 base: add 6 to put us in a usable register
+        clc
+        adc #6
+
+        ; clamp 0..71
+        cmp #72
+        bcc _semi_ok
+        lda #71
+_semi_ok
+        rts
+
+; =====================================================================
+; SET SID FREQUENCIES FROM NOTE INDICES
+; =====================================================================
+set_sid_freq
+        ; voice 1
+        lda v1_note
+        asl a                   ; *2 for word-sized table lookup
+        tax
+        lda freq_tbl,x
+        sta V1_FLO
+        lda freq_tbl+1,x
+        sta V1_FHI
+
+        ; voice 2
+        lda v2_note
+        asl a
+        tax
+        lda freq_tbl,x
+        sta V2_FLO
+        lda freq_tbl+1,x
+        sta V2_FHI
+
+        ; voice 3
+        lda v3_note
+        asl a
+        tax
+        lda freq_tbl,x
+        sta V3_FLO
+        lda freq_tbl+1,x
+        sta V3_FHI
+        rts
+
+; =====================================================================
+; SET SID FILTER
+; =====================================================================
+set_sid_filter
+        lda filt_on
+        beq _filt_off
+        lda #$00
+        sta FC_LO
+        ; in retrig mode, use decaying filt_cur; otherwise use filt_cut directly
+        lda retrig
+        beq _filt_static
+        lda filt_cur
+        sta FC_HI
+        ; decay filter cutoff toward 0 each frame
+        lda filt_cur
+        beq _filt_routed
+        dec filt_cur
+        jmp _filt_routed
+_filt_static
+        lda filt_cut
+        sta FC_HI
+_filt_routed
+        lda #$77                ; resonance=$7, route voices 1+2+3
+        sta RES_FILT
+        lda #$1f                ; low-pass + vol 15
+        sta MODE_VOL
+        rts
+_filt_off
+        lda #$00
+        sta RES_FILT
+        lda #$0f                ; no filter mode bits, vol 15
+        sta MODE_VOL
+        rts
+
+; =====================================================================
+; SET GATE BITS
+; =====================================================================
+set_gates
+        ldx wave_idx
+        lda wave_cr,x           ; base waveform byte
+        ldx sounding
+        beq _gate_off
+        ora #$01                ; set gate
+        jmp _gate_write
+_gate_off
+        and #$fe                ; clear gate
+_gate_write
+        sta V1_CR
+        sta V2_CR
+        sta V3_CR
+        rts
+
+; =====================================================================
+; RETRIGGER GATES (2-frame hard restart, matches GoatTracker technique)
+; =====================================================================
+; Gate must be off for 2+ frames with ADSR=$0000 to avoid the SID's
+; ADSR bug (envelope counter wraps and locks up if gate-on happens
+; while counter is near max).
+retrigger_gates
+        ; if countdown active, handle it
+        lda rt_count
+        beq _rt_check
+        dec rt_count
+        bne _rt_done
+        ; countdown reached 0: set percussive ADSR and gate on
+        lda #$09                ; attack=0 (instant), decay=9 (750ms)
+        sta V1_AD
+        sta V2_AD
+        sta V3_AD
+        lda #$00                ; sustain=0, release=0 (full decay to silence)
+        sta V1_SR
+        sta V2_SR
+        sta V3_SR
+        lda filt_cut            ; reset filter envelope to user's cutoff
+        sta filt_cur
+        jsr set_gates
+        rts
+
+_rt_check
+        lda retrig
+        beq _rt_done
+        lda sounding
+        beq _rt_done
+        lda pos_x
+        cmp prev_x
+        bne _rt_do
+        lda pos_y
+        cmp prev_y
+        beq _rt_done
+_rt_do
+        ; ADSR = $0000 (fastest decay on all parameters)
+        lda #$00
+        sta V1_AD
+        sta V2_AD
+        sta V3_AD
+        sta V1_SR
+        sta V2_SR
+        sta V3_SR
+        ; gate off
+        ldx wave_idx
+        lda wave_cr,x
+        sta V1_CR
+        sta V2_CR
+        sta V3_CR
+        ; 2-frame countdown before gate-on
+        lda #2
+        sta rt_count
+_rt_done
+        rts
+
+; =====================================================================
+; INIT SID
+; =====================================================================
+sid_init
+        ; zero all registers
+        ldx #$18
+        lda #$00
+_szero  sta SID,x
+        dex
+        bpl _szero
+
+        ; ADSR: slow attack, mid decay, high sustain, slow release
+        lda #$69
+        sta V1_AD
+        sta V2_AD
+        sta V3_AD
+        lda #$b6
+        sta V1_SR
+        sta V2_SR
+        sta V3_SR
+
+        ; pulse width 50%
+        lda #$00
+        sta V1_PWLO
+        sta V2_PWLO
+        sta V3_PWLO
+        lda #$08
+        sta V1_PWHI
+        sta V2_PWHI
+        sta V3_PWHI
+
+        ; set volume
+        lda #$0f
+        sta MODE_VOL
+
+        ; gate on with default waveform
+        jsr set_gates
+        rts
+
+; =====================================================================
+; READ KEYBOARD VIA KERNAL GETIN
+; =====================================================================
+read_keys
+        jsr KERNAL_GETIN
+        bne _has_key
+        jmp _key_done
+_has_key
+
+        ; --- scale selection: '1'..'6' ---
+        cmp #$31                ; '1'
+        bcc _not_num
+        cmp #$37                ; '7'
+        bcs _not_num
+        sec
+        sbc #$31
+        sta cur_scale
+        jsr set_gates
+        rts
+_not_num
+
+        ; --- W: next waveform ---
+        cmp #$57
+        bne _not_w
+        ldx wave_idx
+        inx
+        cpx #4
+        bne _w_ok
+        ldx #0
+_w_ok   stx wave_idx
+        jsr set_gates
+        rts
+_not_w
+
+        ; --- S: prev waveform ---
+        cmp #$53
+        bne _not_s
+        ldx wave_idx
+        dex
+        bpl _s_ok
+        ldx #3
+_s_ok   stx wave_idx
+        jsr set_gates
+        rts
+_not_s
+
+        ; --- Q: voice 3 octave down ---
+        cmp #$51
+        bne _not_q
+        lda v3_oct
+        cmp #$f4                ; already at -12?
+        bne _q_ok
+        rts
+_q_ok   sec
+        sbc #12
+        sta v3_oct
+        rts
+_not_q
+
+        ; --- E: voice 3 octave up ---
+        cmp #$45
+        bne _not_e
+        lda v3_oct
+        cmp #12                 ; already at +12?
+        bne _e_ok
+        rts
+_e_ok   clc
+        adc #12
+        sta v3_oct
+        rts
+_not_e
+
+        ; --- comma: filter cutoff down ---
+        cmp #$2c
+        bne _not_comma
+        lda filt_cut
+        sec
+        sbc #$08
+        bcs _fc_dn_ok
+        lda #$00
+_fc_dn_ok
+        sta filt_cut
+        rts
+_not_comma
+
+        ; --- period: filter cutoff up ---
+        cmp #$2e
+        bne _not_dot
+        lda filt_cut
+        clc
+        adc #$08
+        bcc _fc_up_ok
+        lda #$ff
+_fc_up_ok
+        sta filt_cut
+        rts
+_not_dot
+
+        ; --- F: toggle filter ---
+        cmp #$46
+        bne _not_f
+        lda filt_on
+        eor #$01
+        sta filt_on
+        rts
+_not_f
+
+        ; --- R: toggle envelope retrigger ---
+        cmp #$52
+        bne _not_r
+        lda retrig
+        eor #$01
+        sta retrig
+        beq _r_drone
+        ; switching to retrig: set percussive ADSR
+        lda #$09
+        sta V1_AD
+        sta V2_AD
+        sta V3_AD
+        lda #$00
+        sta V1_SR
+        sta V2_SR
+        sta V3_SR
+        rts
+_r_drone
+        ; cancel any pending retrigger countdown
+        lda #0
+        sta rt_count
+        ; gate off first so new ADSR triggers a fresh attack
+        ldx wave_idx
+        lda wave_cr,x
+        sta V1_CR
+        sta V2_CR
+        sta V3_CR
+        ; restore sustained ADSR
+        lda #$69
+        sta V1_AD
+        sta V2_AD
+        sta V3_AD
+        lda #$b6
+        sta V1_SR
+        sta V2_SR
+        sta V3_SR
+        ; gate back on
+        jsr set_gates
+        rts
+_not_r
+
+        ; --- SPACE: toggle sound ---
+        cmp #$20
+        bne _key_done
+        lda sounding
+        eor #$01
+        sta sounding
+        jsr set_gates
+_key_done
+        rts
+
+; =====================================================================
+; SCREEN ROUTINES
+; =====================================================================
+
+; --- clear entire screen to spaces, set color to dark gray ---
+clear_screen
+        ldx #0
+        lda #$20                ; space (screen code)
+_cls1   sta SCREEN,x
+        sta SCREEN+$100,x
+        sta SCREEN+$200,x
+        sta SCREEN+$2e8,x
+        dex
+        bne _cls1
+        lda #$0b                ; dark gray
+_cls2   sta COLRAM,x
+        sta COLRAM+$100,x
+        sta COLRAM+$200,x
+        sta COLRAM+$2e8,x
+        dex
+        bne _cls2
+        rts
+
+; --- draw header (rows 0-1) ---
+draw_header
+        ; -- row 0: "SC:" --
+        lda #$13                ; 'S' screen code
+        sta SCREEN+0
+        lda #$03                ; 'C'
+        sta SCREEN+1
+        lda #$3a                ; ':'
+        sta SCREEN+2
+
+        ; scale name (up to 9 chars)
+        ldx cur_scale
+        lda sname_ptr_lo,x
+        sta ptr_lo
+        lda sname_ptr_hi,x
+        sta ptr_hi
+        ldy #0
+_hdr_sn lda (ptr_lo),y
+        cmp #$ff                ; terminator
+        beq _hdr_wave
+        sta SCREEN+3,y
+        iny
+        cpy #10
+        bne _hdr_sn
+
+_hdr_wave
+        ; "WV:" at column 14
+        lda #$17                ; 'W'
+        sta SCREEN+14
+        lda #$16                ; 'V'
+        sta SCREEN+15
+        lda #$3a
+        sta SCREEN+16
+        ; wave name
+        ldx wave_idx
+        lda wname_ptr_lo,x
+        sta ptr_lo
+        lda wname_ptr_hi,x
+        sta ptr_hi
+        ldy #0
+_hdr_wn lda (ptr_lo),y
+        cmp #$ff
+        beq _hdr_filt
+        sta SCREEN+17,y
+        iny
+        cpy #5
+        bne _hdr_wn
+
+_hdr_filt
+        ; filter state at column 23
+        lda #$06                ; 'F'
+        sta SCREEN+23
+        lda #$3a
+        sta SCREEN+24
+        lda filt_on
+        beq _hdr_foff
+        lda #$0f                ; 'O'
+        sta SCREEN+25
+        lda #$0e                ; 'N'
+        sta SCREEN+26
+        lda #$20
+        sta SCREEN+27
+        jmp _hdr_snd
+_hdr_foff
+        lda #$2d                ; '-'
+        sta SCREEN+25
+        sta SCREEN+26
+        lda #$20
+        sta SCREEN+27
+
+_hdr_snd
+        ; sound state at column 29
+        lda sounding
+        beq _hdr_mute
+        lda #$a0                ; inverse space = filled block
+        sta SCREEN+29
+        jmp _hdr_retrig
+_hdr_mute
+        lda #$20
+        sta SCREEN+29
+
+_hdr_retrig
+        ; retrigger state at column 31
+        lda #$12                ; 'R' screen code
+        sta SCREEN+31
+        lda #$3a                ; ':'
+        sta SCREEN+32
+        lda retrig
+        beq _hdr_roff
+        lda #$0f                ; 'O'
+        sta SCREEN+33
+        lda #$0e                ; 'N'
+        sta SCREEN+34
+        lda #$20
+        sta SCREEN+35
+        jmp _hdr_sep
+_hdr_roff
+        lda #$2d                ; '-'
+        sta SCREEN+33
+        sta SCREEN+34
+        lda #$20
+        sta SCREEN+35
+
+_hdr_sep
+        ; row 1: thin separator
+        ldx #39
+        lda #$43                ; horizontal line screen code
+_sep    sta SCREEN+40,x
+        dex
+        bpl _sep
+
+        ; set header color to light green
+        ldx #39
+        lda #$0d                ; light green
+_hcol   sta COLRAM,x
+        sta COLRAM+40,x
+        dex
+        bpl _hcol
+        rts
+
+; --- draw crosshair lines for all three voices ---
+draw_crosshairs
+        ; compute voice 3 screen row: pos_y - v3_step (higher pitch = lower row)
+        ldx cur_scale
+        lda pos_y
+        sec
+        sbc v3_step,x
+        bcc _v3_off             ; negative = off top of screen
+        sta v3_scr
+        jmp _v3_done
+_v3_off lda #$ff
+        sta v3_scr
+_v3_done
+
+        ; === ERASE OLD LINES (write spaces; color doesn't matter for spaces) ===
+
+        ; erase old V1 vertical at prev_x
+        ldy prev_x
+        lda #$20
+        jsr vline_char
+
+        ; erase old V2 horizontal at prev_y
+        lda prev_y
+        clc
+        adc #2                  ; play area offset
+        jsr hline_erase
+
+        ; erase old V3 horizontal at prev_v3scr
+        lda prev_v3scr
+        cmp #$ff
+        beq _skip_ev3
+        clc
+        adc #2
+        jsr hline_erase
+_skip_ev3
+
+        ; === DRAW NEW LINES ===
+
+        ; draw V3 horizontal in yellow (first, so V2 overwrites at overlap)
+        lda v3_scr
+        cmp #$ff
+        beq _skip_dv3
+        clc
+        adc #2
+        tax
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        sta ptr_hi
+        lda #$43                ; horizontal line char
+        jsr hline_fill
+        lda ptr_hi
+        clc
+        adc #($d8-$04)
+        sta ptr_hi
+        lda #$07                ; yellow
+        jsr hline_fill
+_skip_dv3
+
+        ; draw V2 horizontal in light green
+        lda pos_y
+        clc
+        adc #2
+        tax
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        sta ptr_hi
+        lda #$43
+        jsr hline_fill
+        lda ptr_hi
+        clc
+        adc #($d8-$04)
+        sta ptr_hi
+        lda #$0d                ; light green
+        jsr hline_fill
+
+        ; draw V1 vertical in light blue (last, overwrites horizontal chars)
+        ldy pos_x
+        lda #$5d                ; vertical line char
+        jsr vline_char
+        ldy pos_x
+        lda #$0e                ; light blue
+        jsr vline_colr
+
+        ; === FIX INTERSECTIONS with cross character in white ===
+
+        ; V1 x V2 at (pos_y+2, pos_x)
+        lda pos_y
+        clc
+        adc #2
+        tax
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        sta ptr_hi
+        ldy pos_x
+        lda #$5b                ; cross/plus char
+        sta (ptr_lo),y
+        lda ptr_hi
+        clc
+        adc #($d8-$04)
+        sta ptr_hi
+        lda #$01                ; white
+        sta (ptr_lo),y
+
+        ; V1 x V3 at (v3_scr+2, pos_x) if visible
+        lda v3_scr
+        cmp #$ff
+        beq _skip_xv3
+        clc
+        adc #2
+        tax
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        sta ptr_hi
+        ldy pos_x
+        lda #$5b
+        sta (ptr_lo),y
+        lda ptr_hi
+        clc
+        adc #($d8-$04)
+        sta ptr_hi
+        lda #$01
+        sta (ptr_lo),y
+_skip_xv3
+
+        ; update previous-frame tracking
+        lda v3_scr
+        sta prev_v3scr
+        rts
+
+; --- fill a screen row with spaces ---
+; input: A = screen row number (0-24)
+hline_erase
+        tax
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        sta ptr_hi
+        lda #$20                ; space
+        ; fall through
+
+; --- fill 40 columns at ptr with character in A ---
+hline_fill
+        ldy #39
+_hfl    sta (ptr_lo),y
+        dey
+        bpl _hfl
+        rts
+
+; --- fill a vertical column with a character ---
+; input: Y = column, A = character
+; fills screen rows 2-24 (the 23-row play area)
+vline_char
+        sta tmp
+        lda row_lo+2
+        sta ptr_lo
+        lda row_hi+2
+        sta ptr_hi
+        ldx #23
+_vcl    lda tmp
+        sta (ptr_lo),y
+        lda ptr_lo
+        clc
+        adc #40
+        sta ptr_lo
+        bcc +
+        inc ptr_hi
++       dex
+        bne _vcl
+        rts
+
+; --- fill a vertical column with a color ---
+; input: Y = column, A = color
+; fills color RAM rows 2-24
+vline_colr
+        sta tmp
+        lda row_lo+2
+        sta ptr_lo
+        lda row_hi+2
+        clc
+        adc #($d8-$04)
+        sta ptr_hi
+        ldx #23
+_vrl    lda tmp
+        sta (ptr_lo),y
+        lda ptr_lo
+        clc
+        adc #40
+        sta ptr_lo
+        bcc +
+        inc ptr_hi
++       dex
+        bne _vrl
+        rts
+
+; =====================================================================
+; INTRO SCREEN
+; =====================================================================
+show_intro
+        ; set source pointer to intro string data
+        lda #<intro_data
+        sta ptr_lo
+        lda #>intro_data
+        sta ptr_hi
+
+        ; --- render strings ---
+_si_entry
+        ldy #0
+        lda (ptr_lo),y          ; read row byte
+        cmp #$ff
+        beq _si_color           ; $ff = end of string table
+        tax                     ; X = screen row
+        inc ptr_lo
+        bne +
+        inc ptr_hi
++
+        lda (ptr_lo),y          ; read column byte
+        inc ptr_lo
+        bne +
+        inc ptr_hi
++
+        ; compute dest = row_base + col
+        clc
+        adc row_lo,x
+        sta prev_x              ; dest pointer lo
+        lda row_hi,x
+        adc #0
+        sta prev_y              ; dest pointer hi
+
+        ; copy characters until $00 terminator
+_si_str lda (ptr_lo),y          ; read source char (Y=0)
+        beq _si_nxt             ; $00 = end of this string
+        sta (prev_x),y          ; write to screen
+        inc ptr_lo
+        bne +
+        inc ptr_hi
++       inc prev_x
+        bne _si_str
+        inc prev_y
+        jmp _si_str
+
+_si_nxt ; skip past the $00 terminator
+        inc ptr_lo
+        bne +
+        inc ptr_hi
++       jmp _si_entry
+
+        ; --- apply row colors ---
+_si_color
+        lda #<intro_clr
+        sta ptr_lo
+        lda #>intro_clr
+        sta ptr_hi
+
+_si_crow
+        ldy #0
+        lda (ptr_lo),y          ; read row
+        cmp #$ff
+        beq _si_wait            ; $ff = done with colors
+        tax
+        inc ptr_lo
+        bne +
+        inc ptr_hi
++
+        lda (ptr_lo),y          ; read color
+        sta tmp
+        inc ptr_lo
+        bne +
+        inc ptr_hi
++
+        ; compute color RAM address for this row
+        lda row_lo,x
+        sta prev_x
+        lda row_hi,x
+        clc
+        adc #($d8-$04)
+        sta prev_y
+        lda tmp                 ; color value
+        ldy #39
+_si_ccl sta (prev_x),y
+        dey
+        bpl _si_ccl
+        jmp _si_crow
+
+        ; --- wait for space bar via KERNAL ---
+_si_wait
+        jsr KERNAL_GETIN
+        cmp #$20                ; space
+        bne _si_wait
+        rts
+
+; =====================================================================
+; DATA TABLES
+; =====================================================================
+
+; --- waveform control register values (without gate bit) ---
+wave_cr
+        .byte $10               ; triangle
+        .byte $20               ; sawtooth
+        .byte $40               ; pulse
+        .byte $80               ; noise
+
+; --- waveform names (screen codes, $ff terminated) ---
+        .enc "screen"           ; use screen code encoding for .text
+wn_tri  .text "TRI"
+        .byte $ff
+wn_saw  .text "SAW"
+        .byte $ff
+wn_pls  .text "PLS"
+        .byte $ff
+wn_noi  .text "NOI"
+        .byte $ff
+
+wname_ptr_lo
+        .byte <wn_tri, <wn_saw, <wn_pls, <wn_noi
+wname_ptr_hi
+        .byte >wn_tri, >wn_saw, >wn_pls, >wn_noi
+
+; --- scale interval tables ---
+sc_chrom  .byte 0,1,2,3,4,5,6,7,8,9,10,11
+sc_major  .byte 0,2,4,5,7,9,11
+sc_minor  .byte 0,2,3,5,7,8,10
+sc_penta  .byte 0,2,4,7,9
+sc_whole  .byte 0,2,4,6,8,10
+sc_dorian .byte 0,2,3,5,7,9,10
+
+scale_len
+        .byte 12, 7, 7, 5, 6, 7
+
+; voice 3 offset in scale degrees (a fifth where possible)
+;              chrom maj min pent whole dorian
+v3_step .byte  7,    4,  4,  3,   3,    4
+
+scale_ptr_lo
+        .byte <sc_chrom, <sc_major, <sc_minor
+        .byte <sc_penta, <sc_whole, <sc_dorian
+scale_ptr_hi
+        .byte >sc_chrom, >sc_major, >sc_minor
+        .byte >sc_penta, >sc_whole, >sc_dorian
+
+; --- scale names (screen codes, $ff terminated, padded to 9 chars) ---
+sn_chr  .text "CHROMATIC"
+        .byte $ff
+sn_maj  .text "MAJOR    "
+        .byte $ff
+sn_min  .text "MINOR    "
+        .byte $ff
+sn_pen  .text "PENTA    "
+        .byte $ff
+sn_whl  .text "WHOLETONE"
+        .byte $ff
+sn_dor  .text "DORIAN   "
+        .byte $ff
+        .enc "none"
+
+; --- intro screen string data ---
+; format: [row, col, text..., $00] ... $ff
+        .enc "screen"
+intro_data
+        .byte 6, 14
+        .text "MANIC MOUSE"
+        .byte $00
+        .byte 4, 7
+        .text "INSPIRED BY LAURIE SPIEGEL"
+        .byte $00
+        .byte 6, 3
+        .text "CONTROLS"
+        .byte $00
+        .byte 8, 3
+        .text "JOYSTICK"
+        .byte $00
+        .byte 8, 20
+        .text "MOVE CURSOR"
+        .byte $00
+        .byte 9, 3
+        .text "SPACE"
+        .byte $00
+        .byte 9, 20
+        .text "TOGGLE SOUND"
+        .byte $00
+        .byte 10, 3
+        .text "1-6"
+        .byte $00
+        .byte 10, 20
+        .text "SELECT SCALE"
+        .byte $00
+        .byte 11, 3
+        .text "W / S"
+        .byte $00
+        .byte 11, 20
+        .text "CYCLE WAVEFORM"
+        .byte $00
+        .byte 12, 3
+        .text "Q / E"
+        .byte $00
+        .byte 12, 20
+        .text "V3 OCTAVE -/+"
+        .byte $00
+        .byte 13, 3
+        .text ", / ."
+        .byte $00
+        .byte 13, 20
+        .text "FILTER CUTOFF"
+        .byte $00
+        .byte 14, 3
+        .text "F"
+        .byte $00
+        .byte 14, 20
+        .text "TOGGLE FILTER"
+        .byte $00
+        .byte 15, 3
+        .text "R"
+        .byte $00
+        .byte 15, 20
+        .text "ENVELOPE RETRIG"
+        .byte $00
+        .byte 17, 3
+        .text "SCALES"
+        .byte $00
+        .byte 18, 3
+        .text "1 CHROMATIC"
+        .byte $00
+        .byte 18, 20
+        .text "2 MAJOR"
+        .byte $00
+        .byte 19, 3
+        .text "3 MINOR"
+        .byte $00
+        .byte 19, 20
+        .text "4 PENTATONIC"
+        .byte $00
+        .byte 20, 3
+        .text "5 WHOLETONE"
+        .byte $00
+        .byte 20, 20
+        .text "6 DORIAN"
+        .byte $00
+        .byte 23, 10
+        .text "PRESS SPACE TO BEGIN"
+        .byte $00
+        .byte $ff
+        .enc "none"
+
+; --- intro screen row color table ---
+; format: [row, color] ... $ff
+intro_clr
+        .byte 1, $01            ; white
+        .byte 2, $01            ; white
+        .byte 4, $0c            ; mid gray
+        .byte 6, $0d            ; light green
+        .byte 8, $0e            ; light blue
+        .byte 9, $0e
+        .byte 10, $0e
+        .byte 11, $0e
+        .byte 12, $0e
+        .byte 13, $0e
+        .byte 14, $0e
+        .byte 15, $0e
+        .byte 17, $0d           ; light green
+        .byte 18, $0e           ; light blue
+        .byte 19, $0e
+        .byte 20, $0e
+        .byte 23, $07           ; yellow
+        .byte $ff
+
+sname_ptr_lo
+        .byte <sn_chr, <sn_maj, <sn_min
+        .byte <sn_pen, <sn_whl, <sn_dor
+sname_ptr_hi
+        .byte >sn_chr, >sn_maj, >sn_min
+        .byte >sn_pen, >sn_whl, >sn_dor
+
+; --- screen row address tables (rows 0-24) ---
+row_lo
+        .byte <(SCREEN+ 0*40), <(SCREEN+ 1*40), <(SCREEN+ 2*40)
+        .byte <(SCREEN+ 3*40), <(SCREEN+ 4*40), <(SCREEN+ 5*40)
+        .byte <(SCREEN+ 6*40), <(SCREEN+ 7*40), <(SCREEN+ 8*40)
+        .byte <(SCREEN+ 9*40), <(SCREEN+10*40), <(SCREEN+11*40)
+        .byte <(SCREEN+12*40), <(SCREEN+13*40), <(SCREEN+14*40)
+        .byte <(SCREEN+15*40), <(SCREEN+16*40), <(SCREEN+17*40)
+        .byte <(SCREEN+18*40), <(SCREEN+19*40), <(SCREEN+20*40)
+        .byte <(SCREEN+21*40), <(SCREEN+22*40), <(SCREEN+23*40)
+        .byte <(SCREEN+24*40)
+row_hi
+        .byte >(SCREEN+ 0*40), >(SCREEN+ 1*40), >(SCREEN+ 2*40)
+        .byte >(SCREEN+ 3*40), >(SCREEN+ 4*40), >(SCREEN+ 5*40)
+        .byte >(SCREEN+ 6*40), >(SCREEN+ 7*40), >(SCREEN+ 8*40)
+        .byte >(SCREEN+ 9*40), >(SCREEN+10*40), >(SCREEN+11*40)
+        .byte >(SCREEN+12*40), >(SCREEN+13*40), >(SCREEN+14*40)
+        .byte >(SCREEN+15*40), >(SCREEN+16*40), >(SCREEN+17*40)
+        .byte >(SCREEN+18*40), >(SCREEN+19*40), >(SCREEN+20*40)
+        .byte >(SCREEN+21*40), >(SCREEN+22*40), >(SCREEN+23*40)
+        .byte >(SCREEN+24*40)
+
+; --- SID frequency table (PAL: clock = 985248 Hz) ---
+; 72 entries (C-1 through B-6), 16-bit little-endian
+; SID freq = round(Hz * 16777216 / 985248)
+freq_tbl
+        ; C-1  C#1  D-1  D#1  E-1  F-1  F#1  G-1  G#1  A-1  A#1  B-1
+        .word $022d,$024e,$0271,$0296,$02be,$02e8
+        .word $0314,$0343,$0375,$03a9,$03e1,$041c
+        ; C-2  C#2  D-2  D#2  E-2  F-2  F#2  G-2  G#2  A-2  A#2  B-2
+        .word $045a,$049c,$04e2,$052d,$057c,$05cf
+        .word $0628,$0685,$06e8,$0752,$07c1,$0837
+        ; C-3  C#3  D-3  D#3  E-3  F-3  F#3  G-3  G#3  A-3  A#3  B-3
+        .word $08b4,$0939,$09c5,$0a5a,$0af7,$0b9e
+        .word $0c4f,$0d0a,$0dd1,$0ea4,$0f82,$106e
+        ; C-4  C#4  D-4  D#4  E-4  F-4  F#4  G-4  G#4  A-4  A#4  B-4
+        .word $1168,$1272,$138a,$14b3,$15ee,$173c
+        .word $189e,$1a15,$1ba2,$1d48,$1f04,$20dc
+        ; C-5  C#5  D-5  D#5  E-5  F-5  F#5  G-5  G#5  A-5  A#5  B-5
+        .word $22d0,$24e4,$2714,$2966,$2bdc,$2e78
+        .word $313c,$342a,$3744,$3a90,$3e08,$41b8
+        ; C-6  C#6  D-6  D#6  E-6  F-6  F#6  G-6  G#6  A-6  A#6  B-6
+        .word $45a0,$49c8,$4e28,$52cc,$57b8,$5cf0
+        .word $627c,$6854,$6e88,$7520,$7c10,$8370

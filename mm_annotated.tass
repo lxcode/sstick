@@ -1,0 +1,2349 @@
+; =====================================================================
+; MM --  ANNOTATED LEARNING VERSION
+; =====================================================================
+;
+; This file is a line-by-line tutorial for someone learning assembly
+; language from scratch. The code is identical to mm.tass -- only the
+; comments are different.
+;
+; =====================================================================
+; PREREQUISITE: WHAT IS ASSEMBLY LANGUAGE?
+; =====================================================================
+;
+; A CPU executes instructions stored in memory as raw numbers (bytes).
+; Assembly language is a thin, human-readable layer on top of those
+; numbers. Each line you write becomes one (or a few) bytes of machine
+; code. There are no variables, no functions, no if/else, no for-loops
+; as language features -- you build all of those from a small set of
+; primitive operations.
+;
+; =====================================================================
+; PREREQUISITE: NUMBERING SYSTEMS
+; =====================================================================
+;
+; Assembly programmers constantly work in three numbering systems:
+;
+;   Decimal (no prefix):  255       The system you already know.
+;   Hexadecimal ($):      $FF       Base 16. Digits: 0-9, A-F.
+;                                   Each hex digit represents 4 bits.
+;                                   Two hex digits = one byte (8 bits).
+;                                   $FF = 15*16 + 15 = 255 decimal.
+;   Binary (%):           %11111111 Base 2. Each digit is one bit.
+;                                   This makes it easy to see which
+;                                   individual bits are set or clear.
+;
+; Why hex? Because one byte is always exactly two hex digits ($00-$FF),
+; and one nybble (half a byte, 4 bits) is one hex digit ($0-$F).
+; This makes it easy to reason about memory and bit patterns.
+;
+; A "word" on the 6502 is two bytes (16 bits), written as four hex
+; digits: $D400. The 6502 stores words in "little-endian" order:
+; the LOW byte comes first in memory, then the HIGH byte.
+; So $D400 is stored as bytes: $00, $D4.
+;
+; =====================================================================
+; PREREQUISITE: BITS AND BITWISE OPERATIONS
+; =====================================================================
+;
+; A bit is a single 0 or 1. A byte is 8 bits. We number them 0-7
+; from right (least significant) to left (most significant):
+;
+;   Bit:     7  6  5  4  3  2  1  0
+;   Value: 128 64 32 16  8  4  2  1
+;
+; For example, the byte $53 = %01010011:
+;   Bit 7=0, 6=1, 5=0, 4=1, 3=0, 2=0, 1=1, 0=1
+;   = 64 + 16 + 2 + 1 = 83 decimal
+;
+; Bitwise operations work on each bit independently:
+;
+;   AND: both bits must be 1 to get 1.
+;        %11001100 AND %10101010 = %10001000
+;        Used to "mask" or isolate specific bits.
+;
+;   ORA (OR): either bit being 1 gives 1.
+;        %11001100 ORA %10101010 = %11101110
+;        Used to "set" specific bits without changing others.
+;
+;   EOR (XOR): bits must differ to get 1.
+;        %11001100 EOR %10101010 = %01100110
+;        Used to "flip" or "toggle" specific bits.
+;
+; Shifting moves all bits left or right:
+;   ASL (shift left):  each bit moves one position left.
+;                       Bit 7 falls into the Carry flag. Bit 0 becomes 0.
+;                       This DOUBLES the value (like multiplying by 2).
+;   LSR (shift right): each bit moves one position right.
+;                       Bit 0 falls into the Carry flag. Bit 7 becomes 0.
+;                       This HALVES the value (like dividing by 2).
+;
+; =====================================================================
+; PREREQUISITE: HOW THE 6502 CPU WORKS
+; =====================================================================
+;
+; The 6502 is an 8-bit CPU. It processes data one byte at a time.
+; It can address 64KB of memory (addresses $0000 to $FFFF).
+;
+; REGISTERS (tiny storage slots inside the CPU itself -- much faster
+; than memory, but there are very few of them):
+;
+;   A   "Accumulator" -- the main working register. Almost all math
+;       and logic operations happen here. You load data INTO A from
+;       memory, do something with it, then store it BACK to memory.
+;
+;   X   "Index register X" -- used mainly for:
+;       - Counting in loops (increment, decrement, compare)
+;       - Indexing into arrays: "lda table,x" loads from (table + X)
+;
+;   Y   "Index register Y" -- similar to X, but also used for:
+;       - Indirect indexed addressing: "lda (ptr),y" (explained below)
+;
+;   SP  "Stack pointer" -- points to the next free slot on the stack.
+;       The STACK is a region of memory ($0100-$01FF) used to:
+;       - Save return addresses when you call a subroutine (JSR/RTS)
+;       - Temporarily save register values (PHA/PLA)
+;       It grows DOWNWARD: pushing decreases SP, pulling increases it.
+;
+;   PC  "Program counter" -- the address of the next instruction the
+;       CPU will execute. You never read/write PC directly; it advances
+;       automatically. Jump and branch instructions change it.
+;
+;   P   "Processor status" -- a byte of FLAG BITS that record what
+;       happened during the last operation. Flags are THE fundamental
+;       mechanism for decision-making in assembly. There is no "if"
+;       statement; instead, an instruction sets flags, and then a
+;       BRANCH instruction tests a flag to decide whether to jump.
+;
+;       The flags:
+;         N (Negative) Set if bit 7 of the result is 1.
+;                      In two's complement, this means the result
+;                      "looks" negative (>= 128 unsigned, or < 0 signed).
+;         V (oVerflow) Set if signed addition/subtraction overflowed.
+;                      (Rarely tested in simple programs.)
+;         B (Break)    Set by the BRK instruction. (Not relevant here.)
+;         D (Decimal)  Enables BCD (Binary Coded Decimal) mode.
+;                      (Not used in this program.)
+;         I (Interrupt) When set, the CPU ignores hardware interrupt
+;                      requests (IRQs). Set by SEI, cleared by CLI.
+;         Z (Zero)     Set if the result of the last operation was
+;                      exactly zero. THIS IS THE MOST-USED FLAG.
+;         C (Carry)    Multiple meanings depending on context:
+;                      - After ADC: set if addition overflowed past 255.
+;                      - After SBC/CMP: set if there was NO borrow
+;                        (i.e., A >= the operand).
+;                      - After ASL: receives bit 7 (the bit shifted out).
+;                      - After LSR: receives bit 0 (the bit shifted out).
+;
+; IMPORTANT: Nearly every instruction that loads or computes a value
+; automatically sets the Z and N flags. This means:
+;   lda some_variable
+;   beq somewhere       ; This works! LDA set Z if the value was 0.
+; You do NOT need a separate compare instruction just to test for zero.
+;
+; =====================================================================
+; PREREQUISITE: ADDRESSING MODES
+; =====================================================================
+;
+; "Addressing mode" = how an instruction specifies WHERE its data is.
+;
+; IMMEDIATE: the data IS the operand (a literal constant).
+;   lda #$42       ; Load the number $42 (66 decimal) into A.
+;                  ; The # symbol means "this is a literal value."
+;                  ; Without #, it would mean "the contents of address $42."
+;
+; ZERO PAGE: access a byte in the first 256 bytes of memory ($00-$FF).
+;   lda $02        ; Load the byte at memory address $0002 into A.
+;                  ; Zero page is special: it takes one fewer byte and
+;                  ; one fewer CPU cycle than a full 16-bit address.
+;                  ; That's why we put frequently-used variables here.
+;
+; ABSOLUTE: access a byte anywhere in the 64KB address space.
+;   lda $d012      ; Load the byte at address $D012 into A.
+;                  ; This takes one more byte (3 vs 2) than zero page.
+;
+; INDEXED: add X or Y to a base address.
+;   lda $d400,x    ; Load from address ($D400 + X). If X=5, reads $D405.
+;   lda table,x    ; Load from (table + X). Used to read arrays/tables.
+;   sta $0400,x    ; Store A to address ($0400 + X).
+;
+; INDIRECT INDEXED: for when you need a pointer.
+;   lda ($fb),y    ; First, read the 16-bit address stored at $FB/$FC.
+;                  ; Then add Y to that address. Then load from there.
+;                  ; Example: if $FB=$00 and $FC=$04, the base address
+;                  ; is $0400. If Y=5, this loads from $0405.
+;                  ; This is the 6502's way of doing pointer arithmetic.
+;                  ; The pointer MUST be in zero page.
+;
+; =====================================================================
+; PREREQUISITE: THE INSTRUCTION SET (just the ones used here)
+; =====================================================================
+;
+; LOAD AND STORE (move data between registers and memory):
+;   LDA src   Load A from memory.        Sets Z, N.
+;   LDX src   Load X from memory.        Sets Z, N.
+;   LDY src   Load Y from memory.        Sets Z, N.
+;   STA dst   Store A to memory.          No flag changes.
+;   STX dst   Store X to memory.          No flag changes.
+;   STY dst   Store Y to memory.          No flag changes.
+;
+; ARITHMETIC:
+;   ADC src   A = A + src + Carry.        Sets C, Z, N, V.
+;             ALWAYS do CLC first, unless you want to add the carry.
+;   SBC src   A = A - src - (1-Carry).    Sets C, Z, N, V.
+;             ALWAYS do SEC first, unless you want to subtract the borrow.
+;             After SBC, Carry=1 means NO borrow (result >= 0).
+;             After SBC, Carry=0 means borrow occurred (result < 0).
+;   INC dst   Increment memory by 1.      Sets Z, N.
+;   DEC dst   Decrement memory by 1.      Sets Z, N.
+;   INX       Increment X by 1.           Sets Z, N.
+;   DEX       Decrement X by 1.           Sets Z, N.
+;   INY       Increment Y by 1.           Sets Z, N.
+;   DEY       Decrement Y by 1.           Sets Z, N.
+;
+; COMPARE (subtraction that ONLY sets flags, doesn't change registers):
+;   CMP src   Compare A with src.         Sets C, Z, N.
+;             Internally computes A - src, but A doesn't change.
+;             Z=1 if A == src (result was zero).
+;             C=1 if A >= src (no borrow needed).
+;             C=0 if A <  src (borrow was needed).
+;   CPX src   Compare X with src.         Same flag logic.
+;   CPY src   Compare Y with src.         Same flag logic.
+;
+; LOGIC (bitwise operations):
+;   AND src   A = A AND src.              Sets Z, N.
+;   ORA src   A = A OR src.               Sets Z, N.
+;   EOR src   A = A XOR src.              Sets Z, N.
+;
+; SHIFT (move bits left or right):
+;   ASL A     Shift A left. Bit 7 -> Carry. Bit 0 = 0. (Multiply by 2.)
+;   LSR A     Shift A right. Bit 0 -> Carry. Bit 7 = 0. (Divide by 2.)
+;
+; BRANCH (conditional jump, limited to +127/-128 bytes):
+;   BEQ addr  Branch if Z=1 (last result was zero / equal).
+;   BNE addr  Branch if Z=0 (last result was non-zero / not equal).
+;   BCS addr  Branch if C=1 (carry set / unsigned >=).
+;   BCC addr  Branch if C=0 (carry clear / unsigned <).
+;   BPL addr  Branch if N=0 (result was positive, bit 7 clear).
+;   BMI addr  Branch if N=1 (result was negative, bit 7 set).
+;
+; JUMP AND SUBROUTINE:
+;   JMP addr  Unconditional jump. No range limit.
+;   JSR addr  Jump to Subroutine. Pushes return address onto the stack,
+;             then jumps. The subroutine calls RTS to come back.
+;   RTS       Return from Subroutine. Pops the return address off the
+;             stack and resumes execution after the original JSR.
+;
+; FLAG MANIPULATION:
+;   CLC       Clear Carry flag (set C=0). Required before ADC.
+;   SEC       Set Carry flag (set C=1). Required before SBC.
+;   SEI       Set Interrupt disable (block hardware interrupts).
+;   CLI       Clear Interrupt disable (allow hardware interrupts).
+;
+; TRANSFER (copy between registers):
+;   TAX       Transfer A to X.            Sets Z, N.
+;   TAY       Transfer A to Y.            Sets Z, N.
+;   TXA       Transfer X to A.            Sets Z, N.
+;   TYA       Transfer Y to A.            Sets Z, N.
+;
+; STACK:
+;   PHA       Push A onto the stack.       SP decreases.
+;   PLA       Pull A from the stack.       SP increases. Sets Z, N.
+;
+; =====================================================================
+; PREREQUISITE: COMMON PATTERNS
+; =====================================================================
+;
+; Since the 6502 has no high-level constructs, you build them from
+; instructions. Here are the patterns you'll see repeatedly:
+;
+; IF/ELSE:
+;   lda something       ; Load the value to test.
+;   cmp #5              ; Compare with 5 (sets flags).
+;   bne else_label      ; Branch to "else" if not equal.
+;   ; ... "if" code ...
+;   jmp endif_label     ; Skip over the "else" code.
+;   else_label
+;   ; ... "else" code ...
+;   endif_label
+;
+; COUNTED LOOP (like "for x = 255 downto 0"):
+;   ldx #255            ; Initialize counter.
+;   loop
+;   ; ... loop body (use X as index) ...
+;   dex                 ; Decrement counter.
+;   bne loop            ; Repeat if X != 0.
+;                       ; (Note: this skips X=0! Often acceptable.)
+;
+; WHILE LOOP (like "while condition"):
+;   loop
+;   lda something       ; Test the condition.
+;   cmp #target
+;   beq done            ; Exit when condition is met.
+;   ; ... loop body ...
+;   jmp loop            ; Go back and test again.
+;   done
+;
+; FUNCTION CALL:
+;   jsr my_function     ; Call the function.
+;   ; execution resumes here after the function returns.
+;   ...
+;   my_function
+;   ; ... do work ...
+;   rts                 ; Return to caller.
+;
+; TOGGLE A FLAG:
+;   lda flag
+;   eor #$01            ; XOR with 1: flips bit 0 (0->1, 1->0).
+;   sta flag
+;
+; =====================================================================
+; PREREQUISITE: THE COMMODORE 64's MEMORY MAP
+; =====================================================================
+;
+; The C64 has 64KB of address space, but it's not all RAM. Hardware
+; chips are "memory-mapped" -- you control them by reading/writing to
+; specific addresses, just like regular memory. Key regions:
+;
+;   $0000-$00FF  "Zero page" -- fast-access RAM for variables.
+;   $0100-$01FF  Stack (used by JSR/RTS, PHA/PLA).
+;   $0400-$07E7  Screen memory (40 x 25 = 1000 character codes).
+;   $0801-...    BASIC program area (we put our code here).
+;   $D000-$D3FF  VIC-II (video chip) registers.
+;   $D400-$D7FF  SID (sound chip) registers.
+;   $D800-$DBE7  Color RAM (one nybble per screen character).
+;   $DC00-$DCFF  CIA1 (keyboard, joystick) registers.
+;   $E000-$FFFF  KERNAL ROM (operating system routines).
+;
+; Writing to a hardware register IMMEDIATELY affects the hardware.
+; For example, storing a value to $D020 instantly changes the border
+; color. Storing values to $D400-$D418 controls the SID sound chip.
+;
+; =====================================================================
+; NOW THE ACTUAL PROGRAM BEGINS
+; =====================================================================
+
+; =====================================================================
+; ZERO PAGE VARIABLES
+; =====================================================================
+; These lines define symbolic names for memory addresses. They produce
+; NO machine code. They just tell the assembler: "when I write pos_x,
+; I mean address $02." This is like #define in C, or a constant alias.
+;
+; We choose the zero page ($00-$FF) for frequently-used variables
+; because zero page addressing is faster (one fewer byte in the
+; instruction, one fewer CPU cycle per access).
+
+pos_x       = $02      ; Cursor column (0-39). The C64 screen is 40 columns wide.
+pos_y       = $03      ; Cursor row within the play area (0-22).
+                        ; This maps to screen rows 2-24 (rows 0-1 are the header).
+cur_scale   = $04      ; Which musical scale is active (0-5).
+                        ; 0=chromatic, 1=major, 2=minor, 3=pentatonic,
+                        ; 4=whole tone, 5=dorian.
+wave_idx    = $05      ; Which SID waveform is selected (0-3).
+                        ; 0=triangle, 1=sawtooth, 2=pulse, 3=noise.
+sounding    = $06      ; Is sound currently playing? 1=yes, 0=no.
+v3_oct      = $07      ; Voice 3 octave shift in semitones: -12, 0, or +12.
+                        ; Stored as a signed byte using two's complement.
+                        ; (Two's complement: -12 is stored as $F4 = 244 unsigned.)
+filt_on     = $08      ; Is the SID's analog filter enabled? 1=yes, 0=no.
+filt_cut    = $09      ; Filter cutoff frequency (high byte, $00-$FF).
+move_tmr    = $0a      ; Movement rate limiter / debounce timer.
+                        ; When > 0, joystick input is ignored (and it counts down).
+                        ; This prevents the cursor from moving too fast.
+v1_note     = $0b      ; Voice 1: index into the frequency table (0-71).
+                        ; Each index corresponds to one semitone.
+v2_note     = $0c      ; Voice 2: same idea.
+v3_note     = $0d      ; Voice 3: same idea.
+joy_raw     = $0e      ; The raw byte read from the joystick port.
+                        ; We save it so we can test different bits of the same reading.
+tmp         = $0f      ; General-purpose scratch variable. Used and overwritten freely.
+v3_scr      = $10      ; Voice 3's play-area row (0-22), or $ff if it's off-screen.
+                        ; Voice 3's horizontal crosshair line is drawn at this row.
+                        ; It can land off the top of the visible play area when the
+                        ; scale-degree offset pushes it beyond row 0.
+prev_v3scr  = $11      ; Previous frame's value of v3_scr. We need to remember this
+                        ; so we can erase the old voice 3 horizontal line before
+                        ; drawing the new one, just like prev_x/prev_y for the cursor.
+ptr_lo      = $fb      ; Low byte of a 16-bit pointer. Used together with ptr_hi
+ptr_hi      = $fc      ; to form a full 16-bit address for indirect addressing.
+                        ; Example: if ptr_lo=$00, ptr_hi=$04, the pointer is $0400.
+prev_x      = $fd      ; Previous cursor X. We save this so we can ERASE the cursor
+prev_y      = $fe      ; at its old position before drawing it at the new one.
+
+; =====================================================================
+; HARDWARE REGISTER ADDRESSES
+; =====================================================================
+; These are memory-mapped I/O addresses. Writing to them directly
+; controls the C64's hardware chips. Each one is explained in detail.
+
+; --- SID (Sound Interface Device) ---
+; The SID chip at $D400 has 29 registers that control 3 sound voices
+; plus global filter and volume. Each voice has:
+;   - Frequency (16-bit): determines the pitch.
+;   - Pulse width (12-bit): only matters for pulse waveform.
+;   - Control register: selects waveform and gate (on/off).
+;   - ADSR envelope: shapes how the volume changes over time.
+;     A=Attack (how fast volume rises), D=Decay (how fast it drops to
+;     sustain level), S=Sustain (held volume level), R=Release (how
+;     fast volume drops to zero when you release the note).
+SID         = $d400
+V1_FLO      = SID+$00  ; Voice 1 frequency, LOW byte.
+V1_FHI      = SID+$01  ; Voice 1 frequency, HIGH byte.
+                        ; Together these are a 16-bit number. Higher value = higher pitch.
+                        ; Actual Hz = register_value * 985248 / 16777216 (on PAL systems).
+V1_PWLO     = SID+$02  ; Voice 1 pulse width, LOW byte.
+V1_PWHI     = SID+$03  ; Voice 1 pulse width, HIGH byte (only bits 0-3 used).
+                        ; 12-bit value ($000-$FFF). Controls the duty cycle of the
+                        ; pulse wave: $800 = 50% = classic square wave.
+V1_CR       = SID+$04  ; Voice 1 CONTROL REGISTER. Each bit has a meaning:
+                        ;   Bit 0: GATE -- 1 = start the note (trigger Attack phase)
+                        ;                  0 = release the note (trigger Release phase)
+                        ;   Bit 4: select Triangle waveform
+                        ;   Bit 5: select Sawtooth waveform
+                        ;   Bit 6: select Pulse waveform
+                        ;   Bit 7: select Noise waveform
+                        ; Only one waveform bit should be set at a time.
+                        ; Example: $21 = %00100001 = sawtooth + gate on.
+V1_AD       = SID+$05  ; Voice 1 Attack (high nybble) and Decay (low nybble).
+                        ; Each is a 4-bit value (0-15) selecting from a predefined
+                        ; set of time constants. Higher = slower.
+V1_SR       = SID+$06  ; Voice 1 Sustain level (high nybble) and Release (low nybble).
+                        ; Sustain is a volume level (0-15), not a time.
+
+; Voices 2 and 3 have identical register layouts, just at different offsets.
+V2_FLO      = SID+$07  ; Voice 2 frequency, low byte.
+V2_FHI      = SID+$08  ; Voice 2 frequency, high byte.
+V2_PWLO     = SID+$09
+V2_PWHI     = SID+$0a
+V2_CR       = SID+$0b  ; Voice 2 control register.
+V2_AD       = SID+$0c
+V2_SR       = SID+$0d
+
+V3_FLO      = SID+$0e  ; Voice 3 frequency, low byte.
+V3_FHI      = SID+$0f  ; Voice 3 frequency, high byte.
+V3_PWLO     = SID+$10
+V3_PWHI     = SID+$11
+V3_CR       = SID+$12  ; Voice 3 control register.
+V3_AD       = SID+$13
+V3_SR       = SID+$14
+
+; SID global registers (affect all voices):
+FC_LO       = SID+$15  ; Filter cutoff frequency, LOW 3 bits (bits 0-2 used).
+FC_HI       = SID+$16  ; Filter cutoff frequency, HIGH 8 bits.
+                        ; Together, an 11-bit cutoff value. Higher = brighter sound.
+RES_FILT    = SID+$17  ; Resonance and voice routing:
+                        ;   Bits 4-7: Resonance amount (0-15). Makes the filter
+                        ;             "ring" at the cutoff frequency.
+                        ;   Bit 0: Route voice 1 through the filter.
+                        ;   Bit 1: Route voice 2 through the filter.
+                        ;   Bit 2: Route voice 3 through the filter.
+MODE_VOL    = SID+$18  ; Filter mode and master volume:
+                        ;   Bit 4: Enable LOW-PASS filter (removes high frequencies).
+                        ;   Bit 5: Enable BAND-PASS filter (keeps frequencies near cutoff).
+                        ;   Bit 6: Enable HIGH-PASS filter (removes low frequencies).
+                        ;   Bit 7: Mute voice 3's output (but it still affects filter).
+                        ;   Bits 0-3: Master volume (0-15).
+
+; --- CIA1 (Complex Interface Adapter) ---
+; The CIA chip handles I/O including joystick and keyboard.
+CIA1_PRA    = $dc00     ; Port A data register. When read, gives the state of
+                        ; joystick 2. The bits are ACTIVE LOW, meaning a pressed
+                        ; button reads as 0, and unpressed reads as 1.
+                        ;   Bit 0: UP      (0 = pressed, 1 = not pressed)
+                        ;   Bit 1: DOWN    (0 = pressed, 1 = not pressed)
+                        ;   Bit 2: LEFT    (0 = pressed, 1 = not pressed)
+                        ;   Bit 3: RIGHT   (0 = pressed, 1 = not pressed)
+                        ;   Bit 4: FIRE    (0 = pressed, 1 = not pressed)
+
+; --- VIC-II (Video Interface Controller) ---
+; The VIC-II chip generates the video display.
+VIC_RASTER  = $d012     ; Reading this gives the current RASTER LINE: which
+                        ; horizontal line of the screen the electron beam is
+                        ; currently drawing. The C64 display has ~312 lines (PAL).
+                        ; Lines 0-50 are the top border. Lines 51-250 are the
+                        ; visible character area. Lines 251+ are the bottom border.
+                        ; We use this to synchronize our code with the display refresh,
+                        ; which prevents visual glitches (flickering).
+VIC_BORDER  = $d020     ; Border color. Write a value 0-15 to change the color.
+VIC_BG      = $d021     ; Background color. Same idea.
+                        ; Color values: 0=black, 1=white, 2=red, ... 15=light gray.
+
+; --- Screen memory and color RAM ---
+SCREEN      = $0400     ; The starting address of the 40x25 character screen.
+                        ; Each byte here holds a "screen code" that selects which
+                        ; character to display. Screen codes are NOT the same as
+                        ; PETSCII (the C64's text encoding) -- they're a separate
+                        ; mapping used by the VIC-II chip.
+                        ; Row 0 starts at $0400, row 1 at $0428 ($0400+40), etc.
+COLRAM      = $d800     ; Color RAM: 1000 nybbles (one per character cell).
+                        ; Each byte's low nybble sets the color of the corresponding
+                        ; character on screen.
+
+; --- KERNAL ROM routine ---
+KERNAL_GETIN = $ffe4    ; A routine built into the C64's ROM. When you JSR here,
+                        ; it reads one character from the keyboard input buffer
+                        ; and returns it in the A register.
+                        ; If no key has been pressed, A = 0.
+                        ; The KERNAL's interrupt handler continuously scans the
+                        ; keyboard matrix and fills this buffer for us.
+
+; A constant used for cursor movement speed.
+MOVE_RATE   = 4         ; The cursor can move once every (MOVE_RATE + 1) frames
+                        ; when a direction is held. At 50 fps (PAL), that's ~10
+                        ; movements per second -- a comfortable speed.
+
+; =====================================================================
+; BASIC AUTOSTART STUB
+; =====================================================================
+; When you type LOAD "filename",8 and then RUN on a C64, the BASIC
+; interpreter looks for a BASIC program starting at address $0801.
+; We don't actually want to write our program in BASIC -- we want to
+; run machine code. So we put a tiny BASIC program here that says:
+;   10 SYS 2061
+; SYS is BASIC's command to execute machine code at an address.
+; 2061 in decimal = $080D in hex, which is where our actual code starts.
+; This way, typing RUN automatically launches our assembly program.
+
+        * = $0801       ; ASSEMBLER DIRECTIVE: "* = address" tells the assembler
+                        ; that the following code should be placed starting at
+                        ; this address in memory. This does NOT generate any code;
+                        ; it sets the assembler's internal "program counter."
+
+        ; A BASIC line is stored in memory as:
+        ;   [2 bytes: pointer to the NEXT line's address]
+        ;   [2 bytes: line number]
+        ;   [BASIC tokens and text]
+        ;   [1 byte: $00 = end of this line]
+        ; A pointer of $0000 means "end of program."
+
+        .word (+), 10   ; .word emits a 16-bit value (little-endian).
+                        ; (+) is a forward reference to the anonymous label + below.
+                        ; This is the pointer to the next BASIC line.
+                        ; 10 is the BASIC line number.
+
+        .null $9e, "2061"
+                        ; .null emits bytes followed by a terminating $00 byte.
+                        ; $9E is the BASIC token for the SYS command.
+                        ; "2061" is the address as an ASCII string (BASIC parses it).
+                        ; The $00 terminator marks the end of this BASIC line.
+
++       .word 0         ; The + label marks this position. .word 0 emits $00, $00,
+                        ; which means "no more BASIC lines" -- end of program.
+                        ; This is the address that the pointer in the first line
+                        ; pointed to.
+
+; =====================================================================
+; ENTRY POINT
+; =====================================================================
+; This is address $080D (2061 decimal). When BASIC executes SYS 2061,
+; the CPU starts running instructions from here.
+
+        * = $080d       ; Ensure we're at exactly $080D.
+entry                   ; A label. Labels mark addresses so you can refer to them
+                        ; by name instead of by number. "entry" = $080D.
+
+        sei             ; SEI = "Set Interrupt Disable." Sets the I flag in the
+                        ; processor status register. While this flag is set, the
+                        ; CPU ignores hardware interrupt requests (IRQs).
+                        ;
+                        ; Why? The C64's KERNAL generates an IRQ 50 times per second
+                        ; to scan the keyboard, blink the cursor, etc. We don't want
+                        ; that running while we're initializing hardware registers --
+                        ; it could interfere. We'll re-enable interrupts with CLI
+                        ; once setup is complete.
+
+        ; -- Set screen colors to black --
+        lda #$00        ; LDA #$00: Load the IMMEDIATE value $00 (zero) into the
+                        ; accumulator (A register). The # means "literal value."
+                        ; After this: A = 0, Z flag = 1 (result was zero),
+                        ; N flag = 0 (bit 7 is clear).
+
+        sta VIC_BORDER  ; STA = "Store Accumulator." Copy the value in A (which is 0)
+                        ; to the memory address VIC_BORDER ($D020).
+                        ; The VIC-II chip immediately reads this and changes the
+                        ; border color to 0 (black).
+                        ; NOTE: STA does NOT change the A register or any flags.
+                        ; A is still 0 after this.
+
+        sta VIC_BG      ; Store A (still 0) to VIC_BG ($D021).
+                        ; Background becomes black too.
+                        ; We reuse the value already in A -- this is a common
+                        ; optimization. Loading a new value costs cycles and bytes.
+
+        jsr clear_screen
+                        ; JSR = "Jump to SubRoutine." This does two things:
+                        ;   1. Pushes the address of the NEXT instruction onto the
+                        ;      stack (so we can come back later).
+                        ;   2. Jumps to the address labeled "clear_screen."
+                        ; The code at clear_screen will run until it hits an RTS
+                        ; (Return from Subroutine), which pops that saved address
+                        ; off the stack and jumps back here. This is how you call
+                        ; functions in assembly.
+
+        cli             ; Re-enable interrupts so the KERNAL's keyboard scanner
+                        ; runs while show_intro waits for a keypress. Without this,
+                        ; KERNAL_GETIN would never see any keys because the IRQ
+                        ; handler that fills the keyboard buffer is blocked by SEI.
+
+        jsr show_intro
+                        ; Display the intro/help screen. This routine renders all
+                        ; the control instructions onto the screen using a table-
+                        ; driven approach, applies colors, then waits for the user
+                        ; to press space before returning.
+
+        sei             ; Disable interrupts again while we set up hardware
+                        ; registers for the main program.
+
+        jsr clear_screen
+                        ; Wipe the intro screen so the play area starts clean.
+                        ; We already called clear_screen above to set up a blank
+                        ; canvas for show_intro, and now we call it again to remove
+                        ; the intro text before the game begins.
+
+        ; -- Initialize program state --
+        ; We set all our zero-page variables to their starting values.
+        lda #20         ; A = 20 (middle column of 40-column screen).
+        sta pos_x       ; pos_x = 20. (Store A into zero page address $02.)
+        sta prev_x      ; prev_x = 20. (A is still 20 -- STA doesn't change it.)
+        lda #11         ; A = 11 (middle of the 23-row play area: rows 0-22).
+        sta pos_y       ; pos_y = 11.
+        sta prev_y      ; prev_y = 11.
+
+        lda #1          ; A = 1.
+        sta cur_scale   ; Start with scale 1 (major).
+        lda #1
+        sta wave_idx    ; Start with waveform 1 (sawtooth).
+        lda #1
+        sta sounding    ; Sound starts ON (1 = yes).
+        lda #0          ; A = 0.
+        sta v3_oct      ; Voice 3 octave offset = 0 (no shift).
+        sta filt_on     ; Filter starts OFF (0). (A is still 0.)
+        lda #$50        ; A = $50 (80 decimal). A mid-range filter cutoff.
+        sta filt_cut
+        lda #0
+        sta move_tmr    ; Movement timer = 0 (cursor can move immediately).
+        lda #$ff        ; $FF is our sentinel meaning "off-screen" (no previous V3 line).
+        sta prev_v3scr  ; On the first frame, there is no old V3 crosshair to erase,
+                        ; so we set prev_v3scr to $FF. The drawing routine checks for
+                        ; this value and skips the erase step when it sees it.
+
+        jsr sid_init    ; Call the SID initialization subroutine (defined below).
+        jsr draw_header ; Draw the status bar at the top of the screen.
+        jsr draw_crosshairs
+                        ; Draw the crosshair lines at the starting position.
+                        ; This replaces a simple single-character cursor with a full
+                        ; crosshair display: one vertical line for voice 1 (X axis),
+                        ; one horizontal line for voice 2 (Y axis), and another
+                        ; horizontal line for voice 3 (Y + offset).
+
+        cli             ; CLI = "CLear Interrupt disable." Clears the I flag.
+                        ; Hardware interrupts are now allowed again. The KERNAL's
+                        ; interrupt handler will resume scanning the keyboard,
+                        ; which we need for GETIN to work.
+
+; =====================================================================
+; MAIN LOOP
+; =====================================================================
+; This is the heart of the program. It runs forever, once per video
+; frame (~50 times per second on PAL, ~60 on NTSC). Each iteration:
+;   1. Waits for the electron beam to reach the bottom border.
+;   2. Reads input (joystick and keyboard).
+;   3. Updates the sound chip.
+;   4. Redraws the screen.
+;   5. Waits for the beam to leave that line (to avoid double-triggering).
+;
+; Synchronizing to the raster beam is important because:
+;   - It gives us a consistent time base (one update per frame).
+;   - Updating screen memory while the beam is in the border area
+;     prevents visible glitches (the beam isn't reading screen RAM).
+
+main_loop
+        ; -- Wait for raster line 251 --
+        ; Raster line 251 is in the bottom border, safely below the
+        ; visible character area (which ends around line 250).
+_wait1  lda VIC_RASTER  ; Read the current raster line number into A.
+        cmp #251         ; CMP = "CoMPare." Internally computes A - 251 and sets
+                         ; flags, but does NOT change A.
+                         ;   If A == 251: the subtraction result is 0, so Z=1.
+                         ;   If A < 251:  a borrow occurred, so C=0.
+                         ;   If A >= 251: no borrow, so C=1.
+        bne _wait1       ; BNE = "Branch if Not Equal." Jumps to _wait1 if Z=0
+                         ; (meaning A was not 251). This creates a busy-wait loop:
+                         ; keep reading the raster register until it equals 251.
+
+        ; -- Do all the per-frame work --
+        jsr read_joystick   ; Read joystick and update cursor position.
+        jsr quantize        ; Convert cursor X/Y to musical note numbers.
+        jsr set_sid_freq    ; Write those note frequencies to the SID chip.
+        jsr set_sid_filter  ; Update the SID filter settings.
+        jsr read_keys       ; Check if any keyboard keys were pressed.
+        jsr draw_header     ; Redraw the status display (top 2 rows).
+        jsr draw_crosshairs ; Draw crosshair lines for all three voices.
+
+        ; -- Wait until raster LEAVES line 251 --
+        ; Our code runs much faster than one scanline. Without this wait,
+        ; we'd loop back to _wait1 and immediately find raster == 251
+        ; again, causing our code to run many times per frame.
+_wait2  lda VIC_RASTER
+        cmp #251
+        beq _wait2       ; BEQ = "Branch if Equal." Stay here WHILE line is still 251.
+                         ; Once the beam moves to line 252, Z=0, and we fall through.
+
+        jmp main_loop    ; JMP = unconditional jump. Go back to the top of the loop.
+                         ; Unlike branches, JMP can reach any address in memory.
+                         ; This loop never ends -- the program runs until you
+                         ; turn off the computer or hit RUN/STOP + RESTORE.
+
+; =====================================================================
+; READ JOYSTICK PORT 2
+; =====================================================================
+; Reads the joystick state and moves the cursor accordingly.
+;
+; The joystick is read from CIA1_PRA ($DC00). The bits are ACTIVE LOW,
+; which means a pressed direction reads as 0. This is counterintuitive
+; but common in hardware design (it's electrically simpler).
+;
+; To test if a bit is 0 (pressed), we can either:
+;   1. AND with a mask and check if the result is zero, or
+;   2. Shift the bit into the Carry flag and test with BCS/BCC.
+; This code uses both techniques.
+
+read_joystick
+        ; Save the current position. We'll need the old position to
+        ; erase the cursor from where it was before we move it.
+        lda pos_x       ; A = current X position.
+        sta prev_x      ; Save it as the previous X.
+        lda pos_y
+        sta prev_y
+
+        lda CIA1_PRA    ; Read the joystick port. A now holds all 5 bits.
+        sta joy_raw     ; Store the raw reading. We'll need to re-read it
+                        ; multiple times (once for each direction), because
+                        ; testing one bit clobbers the value in A.
+
+        ; -- RATE LIMITER for directional movement --
+        ; Without this, the cursor would move one position every frame
+        ; (50 positions/second on PAL), which is too fast to control.
+        ; The timer counts down each frame; movement is only allowed when
+        ; it reaches 0, then it's reset to MOVE_RATE.
+        lda move_tmr    ; LDA sets Z if the value is 0.
+        beq _move_ok    ; BEQ: if timer is 0, movement is allowed.
+        dec move_tmr    ; Timer is non-zero: count it down by 1.
+                        ; DEC = Decrement memory. Subtracts 1 from the byte at
+                        ; the given address. Sets Z and N flags.
+        rts             ; Return without moving. Try again next frame.
+
+_move_ok
+        ; -- TEST UP (bit 0 of joystick byte) --
+        lda joy_raw     ; Reload the joystick byte (we clobbered A earlier).
+        lsr a           ; LSR = "Logical Shift Right." Shifts all bits right by 1.
+                        ; Bit 0 (the UP bit) falls into the CARRY flag.
+                        ; Bit 7 becomes 0. A becomes (joy_raw >> 1).
+                        ;
+                        ; Remember: joystick is ACTIVE LOW.
+                        ;   UP pressed:     bit 0 was 0, so Carry = 0.
+                        ;   UP not pressed: bit 0 was 1, so Carry = 1.
+        bcs _no_up      ; BCS = "Branch if Carry Set." If Carry=1, UP is NOT
+                        ; pressed, so skip the movement code.
+
+        ; UP is pressed. Move cursor up (decrease Y).
+        lda pos_y       ; Check if we're already at the top (Y=0).
+        beq _no_up      ; BEQ: if pos_y is zero, can't go higher. Skip.
+                        ; (LDA set Z=1 because the value was 0.)
+        dec pos_y       ; Decrease pos_y by 1. The cursor moves up.
+
+_no_up
+        ; -- TEST DOWN (bit 1) --
+        lda joy_raw     ; Reload (we might have clobbered A above).
+        lsr a           ; Shift right once: bit 0 goes to Carry (discard it).
+        lsr a           ; Shift right again: now bit 1 (DOWN) goes to Carry.
+                        ; We shift TWICE because we want bit 1, not bit 0.
+        bcs _no_down    ; Carry=1 means DOWN is not pressed.
+        lda pos_y
+        cmp #22         ; Are we at the bottom of the play area?
+                        ; CMP subtracts 22 from A. If A==22, result is 0, Z=1.
+        beq _no_down    ; Already at bottom? Can't go lower.
+        inc pos_y       ; INC = Increment memory by 1. Cursor moves down.
+
+_no_down
+        ; -- TEST LEFT (bit 2) --
+        lda joy_raw
+        lsr a           ; Shift out bit 0...
+        lsr a           ; ...bit 1...
+        lsr a           ; ...now bit 2 (LEFT) is in Carry.
+        bcs _no_left    ; Carry=1 = not pressed.
+        lda pos_x
+        beq _no_left    ; At column 0? Can't go further left.
+        dec pos_x       ; Move cursor left.
+
+_no_left
+        ; -- TEST RIGHT (bit 3) --
+        lda joy_raw
+        lsr a           ; Shift out bit 0...
+        lsr a           ; ...bit 1...
+        lsr a           ; ...bit 2...
+        lsr a           ; ...now bit 3 (RIGHT) is in Carry.
+        bcs _no_right   ; Carry=1 = not pressed.
+        lda pos_x
+        cmp #39         ; Rightmost column of the 40-column screen?
+        beq _no_right   ; Can't go further right.
+        inc pos_x       ; Move cursor right.
+
+_no_right
+        ; -- DID THE CURSOR ACTUALLY MOVE? --
+        ; If it did, we reset the movement timer so there's a delay
+        ; before the next movement (rate limiting).
+        lda pos_x
+        cmp prev_x      ; Compare new X with old X.
+        bne _did_move   ; BNE: if they differ, cursor moved.
+        lda pos_y
+        cmp prev_y      ; Compare new Y with old Y.
+        beq _joy_done   ; BEQ: if both X and Y are unchanged, nothing moved.
+                        ; Fall through to _joy_done (which is just RTS).
+_did_move
+        lda #MOVE_RATE  ; Load the rate constant (4).
+        sta move_tmr    ; Set the timer. Movement will be blocked for 4 more frames.
+_joy_done
+        rts             ; Return to the caller (main_loop).
+
+; =====================================================================
+; QUANTIZE X/Y TO SCALE NOTES
+; =====================================================================
+; This is the musical brain of the program. It converts the cursor's
+; X and Y screen positions into MIDI-like semitone indices, constrained
+; to the currently selected musical scale.
+;
+; The cursor position (0-39 for X, 0-22 for Y) is treated as a
+; "scale degree." A scale degree is a step within a scale. For example,
+; in the major scale (C D E F G A B), degree 0=C, 1=D, 2=E, etc.
+; Degree 7 would be C one octave up, degree 8 would be D, and so on.
+;
+; The degree_to_semi subroutine converts a degree to an absolute
+; semitone number (0-71), which is then used to look up a frequency.
+
+quantize
+        ; -- Voice 1: pitch from X position --
+        lda pos_x       ; A = cursor column (0-39). This is the "degree."
+        jsr degree_to_semi
+                         ; Call the conversion subroutine. It takes A as input
+                         ; and returns the semitone index in A.
+        sta v1_note      ; Save the result for voice 1.
+
+        ; -- Voice 2: pitch from Y position (inverted) --
+        ; We invert Y so that UP on screen = HIGH pitch (musically intuitive).
+        lda #22          ; A = 22 (the maximum Y value).
+        sec              ; SEC = "SEt Carry." You MUST do this before SBC.
+                         ; SBC uses the Carry flag as a "no borrow" indicator.
+                         ; Setting it before subtraction means "start with no borrow."
+                         ; If you forget SEC, SBC will subtract an extra 1!
+        sbc pos_y        ; SBC = "SuBtract with Carry." A = A - pos_y - (1 - Carry).
+                         ; Since we set Carry, this is just A = 22 - pos_y.
+                         ; When pos_y=0 (top of screen), A=22 (high degree = high pitch).
+                         ; When pos_y=22 (bottom), A=0 (low degree = low pitch).
+        jsr degree_to_semi
+        sta v2_note
+
+        ; -- Voice 3: Y position + scale-degree offset (chord-melody style) --
+        ; In Laurie Spiegel's original, voice offsets are measured in SCALE
+        ; STEPS, not semitones. This guarantees voice 3 is always in-scale.
+        ; We offset from the Y axis (same as voice 2), creating a two-note
+        ; chord on Y while voice 1 plays melody on X.
+        ;
+        ; For diatonic scales, +4 scale steps = a perfect fifth (C->G, D->A).
+        ; For pentatonic, +3 steps also = a fifth. Each scale has its own
+        ; offset chosen to land on the most consonant available interval.
+        lda #22
+        sec              ; SEC before SBC, as always.
+        sbc pos_y        ; A = 22 - pos_y (inverted Y, same as voice 2).
+        clc              ; CLC before ADC, as always.
+        ldx cur_scale    ; X = scale index, to look up the per-scale offset.
+        adc v3_step,x    ; Add the scale-degree offset for this scale.
+                         ; Indexed addressing: loads from (v3_step + X).
+                         ; For major (X=1), this adds 4 scale degrees.
+        jsr degree_to_semi
+                         ; Convert the offset degree to a semitone, going through
+                         ; the same scale quantization as voices 1 and 2.
+                         ; Because the offset is in scale degrees, the result is
+                         ; guaranteed to be an in-scale note.
+        clc
+        adc v3_oct       ; Add the octave shift (-12, 0, or +12).
+                         ; v3_oct might be negative ($F4 = -12 in two's complement).
+                         ; ADC doesn't care about signed vs unsigned -- it just adds
+                         ; bytes. But we need to check the result for validity.
+
+        ; -- Clamp the result to the valid range 0-71 --
+        bpl _v3_pos      ; BPL = "Branch if PLus." Tests the N (Negative) flag.
+                         ; If bit 7 of the result is 0, the value is 0-127 (positive).
+                         ; If bit 7 is 1, the value "looks" negative (128-255, which
+                         ; in two's complement represents -128 to -1).
+                         ; If the octave shift made the sum negative, we need to clamp.
+        lda #0           ; Result was negative: floor at 0.
+        jmp _v3_store    ; Skip the upper-bound check.
+_v3_pos
+        cmp #72          ; Is A >= 72? (CMP sets Carry if A >= operand.)
+        bcc _v3_store    ; BCC = "Branch if Carry Clear." Carry clear means A < 72,
+                         ; which is within range -- skip the clamp.
+        lda #71          ; A >= 72: cap at 71.
+_v3_store
+        sta v3_note
+        rts
+
+; --- Convert a scale degree to a semitone index ---
+; Input:  A = degree (0-39)
+; Output: A = semitone index (0-71)
+;
+; Algorithm:
+;   1. Look up which scale we're using and get its interval table.
+;   2. Divide the degree by the scale's length to get:
+;      - Quotient = which octave
+;      - Remainder = which step within the scale
+;   3. Look up the semitone offset for that step in the interval table.
+;   4. Add (octave * 12) to get the absolute semitone.
+;   5. Add a base offset and clamp to 0-71.
+;
+; Example with the major scale (length 7, intervals 0,2,4,5,7,9,11):
+;   Degree 10:
+;     10 / 7 = 1 remainder 3  -> octave 1, step 3
+;     Step 3 in major scale = 5 semitones (F note within the octave)
+;     Add octave: 5 + (1 * 12) = 17 semitones
+;     Add base offset: 17 + 6 = 23 -> the 24th entry in freq_tbl
+
+degree_to_semi
+        sta tmp          ; Save the degree in the scratch variable.
+
+        ; Load a POINTER to the current scale's interval table.
+        ; The 6502 can do indirect addressing, but only through zero page.
+        ; So we store a 16-bit address in ptr_lo/ptr_hi, and then use
+        ; the (ptr_lo),y addressing mode to access the table.
+        ;
+        ; Since a 16-bit address won't fit in one byte, we use TWO
+        ; separate lookup tables: one for the low bytes of all scale
+        ; addresses, one for the high bytes. This "split pointer table"
+        ; pattern is very common in 6502 code.
+        ldx cur_scale    ; LDX = "Load X register." X = scale index (0-5).
+        lda scale_ptr_lo,x
+                          ; Indexed addressing: load from address (scale_ptr_lo + X).
+                          ; If cur_scale is 1 (major), this loads the second byte
+                          ; of scale_ptr_lo, which is the low byte of sc_major's address.
+        sta ptr_lo
+        lda scale_ptr_hi,x
+                          ; Same for the high byte.
+        sta ptr_hi        ; Now ptr_lo/ptr_hi together hold the 16-bit address
+                          ; of the current scale's interval table.
+
+        ; -- Divide degree by scale length --
+        ; The 6502 has NO divide instruction. To divide, we use REPEATED
+        ; SUBTRACTION: keep subtracting the divisor from the dividend
+        ; and count how many times we could do it before the dividend
+        ; goes below the divisor.
+        ;   dividend / divisor = quotient, remainder
+        ;   We count subtractions in Y (quotient = octave number).
+        ;   What's left in A is the remainder (step within scale).
+        lda tmp          ; Reload the degree into A (the dividend).
+        ldx cur_scale    ; X = scale index (to look up scale_len).
+        ldy #0           ; Y = 0. This will count octaves (the quotient).
+
+_div    cmp scale_len,x  ; Is A >= the scale length?
+                          ; CMP sets C=1 if A >= scale_len, C=0 if A < scale_len.
+        bcc _div_done    ; BCC: if A < scale_len, division is done.
+                          ; The remainder is what's left in A.
+        sec
+        sbc scale_len,x  ; Subtract one scale length from A.
+        iny              ; INY = Increment Y by 1. Count one more octave.
+        jmp _div         ; Loop back and try subtracting again.
+                          ; We use JMP instead of a branch because _div might be
+                          ; far away in some cases. (Branches are limited to
+                          ; +127/-128 bytes from the branch instruction.)
+
+_div_done
+        ; Now: A = remainder (step within the scale), Y = quotient (octave number).
+        sty tmp          ; STY = "Store Y." Save the octave count in tmp.
+        tay              ; TAY = "Transfer A to Y." Now Y = the step index.
+                          ; TAY sets Z and N flags based on the value transferred.
+
+        lda (ptr_lo),y   ; INDIRECT INDEXED ADDRESSING. This is the most powerful
+                          ; addressing mode on the 6502. It works in two stages:
+                          ;   1. Read the 16-bit address stored at ptr_lo/ptr_hi.
+                          ;      (ptr_lo is $FB, ptr_hi is $FC.)
+                          ;   2. Add Y to that address.
+                          ;   3. Load the byte at the resulting address.
+                          ;
+                          ; Example: if ptr_lo=$00, ptr_hi=$09 (-> $0900),
+                          ; and Y=3, this loads the byte at address $0903.
+                          ;
+                          ; In our case, the pointer points to a scale's interval
+                          ; table, and Y is the step index. So this loads the
+                          ; semitone offset for that step.
+                          ; For major scale step 3: loads the value 5 (the F note).
+
+        ; -- Add octave * 12 to get the absolute semitone --
+        ; Again, no multiply instruction, so we add 12 repeatedly.
+        ldx tmp          ; X = number of octaves.
+        beq _no_oct      ; If zero octaves, skip the loop.
+_add_oct
+        clc
+        adc #12          ; Add 12 semitones (one octave).
+        dex              ; DEX = Decrement X by 1. Sets Z flag when X reaches 0.
+        bne _add_oct     ; BNE: loop until X == 0.
+_no_oct
+        ; Add a base offset of 6 semitones. This shifts all notes up
+        ; to put them in a more audible range on the SID.
+        clc
+        adc #6
+
+        ; -- Clamp to 0-71 (the valid range of our frequency table) --
+        cmp #72
+        bcc _semi_ok     ; A < 72? It's valid.
+        lda #71          ; A >= 72: cap at 71.
+_semi_ok
+        rts              ; Return with the semitone index in A.
+
+; =====================================================================
+; SET SID FREQUENCIES FROM NOTE INDICES
+; =====================================================================
+; Each note index (0-71) needs to be converted to a 16-bit frequency
+; value that the SID chip understands. We use a lookup table (freq_tbl)
+; that contains precomputed frequency values for all 72 notes.
+;
+; Since each table entry is 2 bytes (16-bit word), and the 6502 can
+; only index by one byte at a time, we multiply the note index by 2
+; to get the byte offset into the table. Then we load two consecutive
+; bytes: the low byte and the high byte.
+
+set_sid_freq
+        ; -- Voice 1 --
+        lda v1_note      ; A = note index (0-71).
+        asl a            ; ASL = "Arithmetic Shift Left." Shifts all bits left by 1.
+                         ;   Bit 7 goes into the Carry flag.
+                         ;   Bit 0 becomes 0.
+                         ;   The value doubles (multiply by 2).
+                         ; So if v1_note was 5, A is now 10 (the byte offset of
+                         ; the 6th entry in the table).
+        tax              ; TAX = "Transfer A to X." X = byte offset.
+                         ; We need the offset in X because we'll use indexed
+                         ; addressing: freq_tbl,x.
+        lda freq_tbl,x   ; Load the LOW byte of the frequency.
+                         ; "freq_tbl,x" means "the byte at address (freq_tbl + X)."
+        sta V1_FLO        ; Store it in the SID's voice 1 frequency low register.
+        lda freq_tbl+1,x  ; Load the HIGH byte (the next byte in the table).
+                         ; "freq_tbl+1,x" means "the byte at (freq_tbl + 1 + X)."
+        sta V1_FHI        ; Store it in voice 1 frequency high register.
+                         ; The SID chip now has the correct 16-bit frequency for
+                         ; voice 1 and will generate sound at that pitch.
+
+        ; -- Voice 2 (identical pattern, different note and registers) --
+        lda v2_note
+        asl a
+        tax
+        lda freq_tbl,x
+        sta V2_FLO
+        lda freq_tbl+1,x
+        sta V2_FHI
+
+        ; -- Voice 3 --
+        lda v3_note
+        asl a
+        tax
+        lda freq_tbl,x
+        sta V3_FLO
+        lda freq_tbl+1,x
+        sta V3_FHI
+        rts
+
+; =====================================================================
+; SET SID FILTER
+; =====================================================================
+; The SID chip has an analog filter that can be applied to any
+; combination of its three voices. There are three filter modes
+; (low-pass, band-pass, high-pass) and a resonance control.
+;
+; This subroutine checks the filt_on flag and either enables
+; or disables the filter accordingly.
+
+set_sid_filter
+        lda filt_on      ; 0 = off, 1 = on. LDA sets Z flag.
+        beq _filt_off    ; BEQ: branch if zero (filter is off).
+
+        ; -- Filter ON --
+        lda #$00
+        sta FC_LO         ; Set the low 3 bits of filter cutoff to 0.
+        lda filt_cut
+        sta FC_HI          ; Set the high 8 bits of cutoff from our variable.
+                           ; Together, this forms an 11-bit cutoff frequency value.
+
+        lda #$77           ; $77 in binary: %01110111
+                           ;   High nybble: $7 = resonance level 7 (out of 0-15).
+                           ;     Resonance makes the filter "ring" at the cutoff
+                           ;     frequency, creating a more pronounced effect.
+                           ;   Low nybble: $7 = %0111 = filter voices 1, 2, AND 3.
+                           ;     Bit 0 = voice 1 through filter: YES
+                           ;     Bit 1 = voice 2 through filter: YES
+                           ;     Bit 2 = voice 3 through filter: YES
+        sta RES_FILT
+
+        lda #$1f           ; $1F = %00011111
+                           ;   Bit 4: low-pass filter ON. Low-pass lets frequencies
+                           ;     below the cutoff through and attenuates higher ones.
+                           ;     This creates a warmer, mellower sound.
+                           ;   Bits 0-3: $F = volume 15 (maximum).
+        sta MODE_VOL
+        rts
+
+_filt_off
+        ; -- Filter OFF --
+        lda #$00
+        sta RES_FILT       ; No resonance, no voices routed to filter.
+        lda #$0f           ; $0F = no filter mode bits (bits 4-7 clear), volume 15.
+        sta MODE_VOL
+        rts
+
+; =====================================================================
+; SET GATE BITS
+; =====================================================================
+; The GATE bit (bit 0) in the voice control register starts and stops
+; notes. The upper bits select the waveform. This subroutine sets the
+; correct control register value for all three voices based on the
+; current waveform selection and sounding state.
+;
+; When GATE goes from 0 to 1, the ADSR envelope starts its Attack
+; phase (volume ramps up). When GATE goes from 1 to 0, the Release
+; phase starts (volume fades down). This is how notes begin and end.
+
+set_gates
+        ldx wave_idx     ; X = waveform index (0-3).
+        lda wave_cr,x    ; Load the base control register value from the table.
+                          ; For example, index 1 (sawtooth) loads $20 = %00100000.
+                          ; This has the sawtooth bit (bit 5) set but gate (bit 0) clear.
+
+        ldx sounding      ; X = sounding state (0 or 1).
+                          ; We load this into X so we can test it without losing
+                          ; the waveform value that's in A.
+        beq _gate_off     ; BEQ: if sounding==0 (but wait -- we loaded into X, not A!).
+                          ; TRICK: LDX sets the Z flag just like LDA does.
+                          ; If the value loaded was 0, Z=1, and BEQ branches.
+
+        ; Sound is ON: set the gate bit.
+        ora #$01          ; ORA = "OR with Accumulator." A = A OR %00000001.
+                          ; This SETS bit 0 (gate) without disturbing any other bits.
+                          ; If A was $20 (sawtooth), it becomes $21 (sawtooth + gate).
+        jmp _gate_write   ; Skip the gate-off code.
+
+_gate_off
+        ; Sound is OFF: clear the gate bit.
+        and #$fe          ; AND with %11111110. This CLEARS bit 0 (gate) without
+                          ; disturbing any other bits. $FE has every bit set EXCEPT
+                          ; bit 0, so AND preserves all bits except bit 0.
+                          ; If A was $21, it becomes $20. If it was $20, it stays $20.
+
+_gate_write
+        sta V1_CR         ; Write the control byte to all three voice control registers.
+        sta V2_CR         ; All voices use the same waveform and gate state in this program.
+        sta V3_CR
+        rts
+
+; =====================================================================
+; INITIALIZE THE SID CHIP
+; =====================================================================
+; Sets up all SID registers to known values. This runs once at startup.
+
+sid_init
+        ; -- Zero all 25 SID registers --
+        ; This silences all voices and clears all settings.
+        ldx #$18         ; X = $18 = 24. The SID has registers 0-24.
+        lda #$00         ; A = 0 (the value we'll write to each register).
+_szero  sta SID,x        ; Store 0 to SID register at offset X.
+                          ; When X=24, this writes to SID+24 = $D418 (MODE_VOL).
+                          ; When X=0, this writes to SID+0 = $D400 (V1_FLO).
+        dex              ; X = X - 1.
+        bpl _szero       ; BPL = "Branch if PLus." Tests the N flag.
+                          ; DEX sets N based on the new value of X.
+                          ; When X goes from 0 to $FF (255), bit 7 is set, so N=1.
+                          ; BPL doesn't branch when N=1, so the loop ends.
+                          ; This loop runs for X = 24, 23, 22, ... 1, 0 (25 iterations).
+
+        ; -- Set ADSR (Attack/Decay/Sustain/Release) for all voices --
+        lda #$69         ; $69 = Attack=$6, Decay=$9.
+                          ;   Attack $6  = ~100ms (how fast volume rises from 0 to max).
+                          ;   Decay $9   = ~750ms (how fast it drops from max to sustain).
+                          ; The high nybble ($6) is Attack, low nybble ($9) is Decay.
+                          ; Each is an index into a fixed set of time values built
+                          ; into the SID chip (not linear -- they're predefined).
+        sta V1_AD
+        sta V2_AD
+        sta V3_AD         ; All three voices get the same envelope.
+
+        lda #$b6         ; $B6 = Sustain=$B, Release=$6.
+                          ;   Sustain $B = level 11 out of 15 (~73% volume).
+                          ;     Unlike the other ADSR values, sustain is a LEVEL,
+                          ;     not a time. It's the volume held while the gate is on.
+                          ;   Release $6 = ~300ms (how fast volume fades after gate off).
+        sta V1_SR
+        sta V2_SR
+        sta V3_SR
+
+        ; -- Set pulse width for all voices --
+        ; Pulse width determines the duty cycle of the PULSE waveform.
+        ; $0800 out of $0FFF = exactly 50%, which gives a classic square wave.
+        ; Other values create asymmetric waveforms with different timbres.
+        ; This only matters when the pulse waveform is selected (wave_idx=2).
+        lda #$00
+        sta V1_PWLO       ; Low byte = $00.
+        sta V2_PWLO
+        sta V3_PWLO
+        lda #$08
+        sta V1_PWHI       ; High byte = $08. Together: $0800 = 2048.
+        sta V2_PWHI       ;   Max is $0FFF = 4095. So 2048/4096 = 50%.
+        sta V3_PWHI
+
+        ; -- Set master volume to maximum --
+        lda #$0f         ; Low nybble $F = volume 15 (max). High nybble $0 = no filter.
+        sta MODE_VOL
+
+        ; -- Turn on sound with the default waveform --
+        jsr set_gates     ; This reads wave_idx and sounding and sets control registers.
+        rts
+
+; =====================================================================
+; READ KEYBOARD VIA KERNAL GETIN
+; =====================================================================
+; This subroutine checks if a key was pressed and handles the command.
+; GETIN returns the PETSCII code of the key in A, or 0 if no key.
+; PETSCII is the C64's character encoding -- similar to ASCII but with
+; some differences. Letter codes: A=$41, B=$42, ..., Z=$5A.
+;
+; This is structured as a long chain of comparisons, like:
+;   if (key == '1') { ... }
+;   else if (key == 'W') { ... }
+;   else if (key == 'S') { ... }
+;   etc.
+; In assembly, each "else if" is done with CMP + BNE.
+
+read_keys
+        jsr KERNAL_GETIN  ; Call the KERNAL routine. A = key code or 0.
+                           ; LDA-equivalent behavior: Z and N flags are set.
+        bne _has_key       ; BNE: if A is non-zero, a key was pressed. Go handle it.
+        jmp _key_done      ; No key pressed. Jump to return.
+                           ; Why JMP and not BEQ/BNE? Because _key_done is at the
+                           ; END of this long subroutine, more than 128 bytes away.
+                           ; Branch instructions can only jump +127/-128 bytes.
+                           ; JMP has no range limit. This is a standard workaround:
+                           ; invert the branch condition (BNE instead of BEQ) to
+                           ; skip over a JMP.
+_has_key
+
+        ; --- SCALE SELECTION: keys '1' through '6' ---
+        ; We check if the key code is in the range $31-$36 (ASCII/PETSCII '1'-'6').
+        cmp #$31           ; Is A >= '1' ($31)?
+                            ; CMP sets C=1 if A >= $31, C=0 if A < $31.
+        bcc _not_num       ; BCC: if A < '1', it's not a number key. Skip.
+        cmp #$37           ; Is A < '7' ($37)?
+                            ; CMP sets C=0 if A < $37.
+        bcs _not_num       ; BCS: if A >= '7', it's not in our range. Skip.
+
+        ; A is in the range $31-$36 (keys '1' through '6').
+        sec
+        sbc #$31           ; Convert key code to index: '1' ($31) -> 0, '2' -> 1, etc.
+        sta cur_scale      ; Set the active scale.
+        jsr set_gates      ; Refresh the SID control registers.
+        rts                ; Return immediately (key handled).
+_not_num
+
+        ; --- W: cycle to next waveform ---
+        cmp #$57           ; PETSCII 'W' = $57.
+        bne _not_w         ; Not 'W'? Skip to next check.
+        ldx wave_idx       ; X = current waveform index.
+        inx                ; X = X + 1.
+        cpx #4             ; CPX = "Compare X." Is X == 4 (past the last waveform)?
+                            ; CPX works like CMP but for the X register.
+        bne _w_ok          ; If X != 4, the new index is valid.
+        ldx #0             ; X == 4: wrap around to 0 (triangle).
+_w_ok   stx wave_idx       ; Save the new waveform index.
+        jsr set_gates      ; Apply the new waveform to all voices.
+        rts
+_not_w
+
+        ; --- S: cycle to previous waveform ---
+        cmp #$53           ; PETSCII 'S' = $53.
+        bne _not_s
+        ldx wave_idx
+        dex                ; X = X - 1.
+        bpl _s_ok          ; BPL: if X >= 0, it's valid.
+                            ; When X was 0, DEX makes it $FF (255). Bit 7 of $FF
+                            ; is 1, so the N flag is set. BPL doesn't branch.
+        ldx #3             ; Wrap around to 3 (noise).
+_s_ok   stx wave_idx
+        jsr set_gates
+        rts
+_not_s
+
+        ; --- Q: voice 3 octave down ---
+        cmp #$51           ; PETSCII 'Q' = $51.
+        bne _not_q
+        lda v3_oct         ; Load the current octave offset.
+        cmp #$f4           ; $F4 = -12 in two's complement.
+                            ; TWO'S COMPLEMENT is how computers represent negative
+                            ; numbers. To get -12: start with 12 = %00001100,
+                            ; flip all bits: %11110011 = $F3, add 1: %11110100 = $F4.
+                            ; So $F4 means -12. The CPU doesn't inherently "know"
+                            ; if a byte is signed or unsigned -- it's up to your code
+                            ; to interpret it correctly.
+        beq _key_done      ; If already at -12, don't go lower.
+        sec
+        sbc #12            ; Subtract 12 (one octave). If v3_oct was 0, it becomes
+                            ; 0 - 12 = -12 = $F4. If it was 12, it becomes 0.
+        sta v3_oct
+        rts
+_not_q
+
+        ; --- E: voice 3 octave up ---
+        cmp #$45           ; PETSCII 'E' = $45.
+        bne _not_e
+        lda v3_oct
+        cmp #12            ; Already at +12?
+        beq _key_done
+        clc
+        adc #12            ; Add 12 (one octave up).
+        sta v3_oct
+        rts
+_not_e
+
+        ; --- Comma (,): decrease filter cutoff ---
+        cmp #$2c           ; PETSCII ',' = $2C.
+        bne _not_comma
+        lda filt_cut
+        sec
+        sbc #$08           ; Decrease cutoff by 8.
+        bcs _fc_dn_ok      ; BCS: after SBC, Carry=1 means NO borrow occurred.
+                            ; No borrow = the result is >= 0, so it's valid.
+                            ; Carry=0 means borrow = the result went below 0
+                            ; (wrapped around to a large value).
+        lda #$00           ; Underflow: clamp at 0.
+_fc_dn_ok
+        sta filt_cut
+        rts
+_not_comma
+
+        ; --- Period (.): increase filter cutoff ---
+        cmp #$2e           ; PETSCII '.' = $2E.
+        bne _not_dot
+        lda filt_cut
+        clc
+        adc #$08           ; Increase cutoff by 8.
+        bcc _fc_up_ok      ; BCC: after ADC, Carry=0 means no overflow.
+                            ; Carry=1 means the result exceeded 255 (wrapped to 0+).
+        lda #$ff           ; Overflow: clamp at 255.
+_fc_up_ok
+        sta filt_cut
+        rts
+_not_dot
+
+        ; --- F: toggle filter on/off ---
+        cmp #$46           ; PETSCII 'F' = $46.
+        bne _not_f
+        lda filt_on
+        eor #$01           ; Toggle: 0->1 or 1->0.
+        sta filt_on
+        rts
+_not_f
+
+        ; --- SPACE: toggle sound on/off ---
+        cmp #$20           ; PETSCII space = $20.
+        bne _key_done      ; Not space? No key matched. Fall through to return.
+        lda sounding       ; Load current state (0 or 1).
+        eor #$01           ; EOR = Exclusive OR. XOR with %00000001.
+                            ; This flips bit 0:  0 XOR 1 = 1,  1 XOR 1 = 0.
+                            ; So sounding toggles between 0 and 1.
+        sta sounding       ; Save the new state.
+        jsr set_gates      ; Update SID gate bits to match.
+_key_done
+        rts
+
+; =====================================================================
+; SCREEN ROUTINES
+; =====================================================================
+
+; --- Clear entire screen to spaces, set color RAM to dark gray ---
+;
+; The C64 screen is 40 columns x 25 rows = 1000 bytes of character data,
+; starting at $0400. There's also 1000 bytes of color RAM at $D800.
+;
+; Problem: the X register is 8 bits, so it can only count 0-255.
+; But we need to fill 1000 bytes. Solution: use FOUR separate STA
+; instructions inside the loop, each targeting a different 256-byte
+; region. 4 * 256 = 1024, which more than covers 1000 bytes.
+; (The last region starts at $06E8 and goes a bit past the screen,
+; but that extra overlap is harmless.)
+
+clear_screen
+        ldx #0             ; X starts at 0. After DEX it'll be 255, then 254, ...
+                            ; The loop runs 256 times (0, 255, 254, ... 1).
+        lda #$20           ; Screen code $20 = space character (a blank cell).
+                            ; (Screen codes are what the VIC-II reads from screen
+                            ;  memory. They're different from PETSCII/ASCII codes.
+                            ;  Space happens to be $20 in all three systems.)
+
+_cls1   sta SCREEN,x       ; Write space to $0400+X.
+        sta SCREEN+$100,x  ; Write space to $0500+X.
+        sta SCREEN+$200,x  ; Write space to $0600+X.
+        sta SCREEN+$2e8,x  ; Write space to $06E8+X.
+                            ; Together, these cover $0400-$07E7 (and a bit beyond).
+        dex                ; X = X - 1. When X goes from 0 to 255, N is set,
+                            ; but Z is 0 (255 != 0), so BNE still branches.
+                            ; When X counts down from 255 back to 0, Z=1 and BNE
+                            ; does NOT branch, ending the loop.
+                            ;
+                            ; Wait -- X starts at 0, we store (at offset 0), then
+                            ; DEX makes it 255. We loop for 255 more iterations
+                            ; (255, 254, ... 1). When X reaches 0 again, we DON'T
+                            ; loop -- but we already stored at offset 0 in the first
+                            ; iteration! So all 256 offsets (0-255) are covered.
+        bne _cls1
+
+        ; Now fill color RAM the same way, with dark gray.
+        ; (X is already 0 from the previous loop.)
+        lda #$0b           ; Color $0B = dark gray.
+_cls2   sta COLRAM,x       ; Write to color RAM at $D800+X.
+        sta COLRAM+$100,x  ; $D900+X.
+        sta COLRAM+$200,x  ; $DA00+X.
+        sta COLRAM+$2e8,x  ; $DAE8+X.
+        dex
+        bne _cls2
+        rts
+
+; --- Draw the status header (rows 0 and 1 of the screen) ---
+;
+; This writes characters directly to screen memory. On the C64, each
+; byte in screen memory ($0400-$07E7) selects a character from the
+; character ROM. The encoding is called "screen codes":
+;   $00 = @     $01 = A     $02 = B     ...     $1a = Z
+;   $20 = space $30 = 0     $31 = 1     ...     $3a = :
+; This is NOT the same as PETSCII (the keyboard/BASIC encoding).
+; For example, PETSCII 'A' = $41, but screen code 'A' = $01.
+
+draw_header
+        ; -- "SC:" at row 0, columns 0-2 --
+        lda #$13           ; Screen code for 'S' (S is letter 19, $13 in hex).
+        sta SCREEN+0       ; Write to the first cell of screen memory.
+        lda #$03           ; Screen code for 'C'.
+        sta SCREEN+1       ; Second cell.
+        lda #$3a           ; Screen code for ':'.
+        sta SCREEN+2       ; Third cell.
+
+        ; -- Scale name (starting at column 3) --
+        ; Each scale has a name stored as a string of screen codes,
+        ; terminated by $FF. We use a pointer table to find the right string.
+        ldx cur_scale      ; X = scale index (0-5).
+        lda sname_ptr_lo,x ; Get the low byte of the name string's address.
+        sta ptr_lo
+        lda sname_ptr_hi,x ; Get the high byte.
+        sta ptr_hi          ; ptr_lo/ptr_hi now point to the name string.
+
+        ldy #0             ; Y = character index within the string.
+_hdr_sn lda (ptr_lo),y    ; Load the next character using indirect indexed addressing.
+                            ; The pointer (ptr_lo/ptr_hi) gives the base address of
+                            ; the string, and Y gives the offset within it.
+        cmp #$ff           ; $FF means end of string.
+        beq _hdr_wave      ; Done with the name? Move on.
+        sta SCREEN+3,y     ; Write the character to column (3 + Y).
+                            ; We use absolute indexed addressing here: the base
+                            ; address is SCREEN+3, and Y is the offset.
+        iny                ; Y = Y + 1 (next character).
+        cpy #10            ; CPY = "Compare Y." Safety limit: don't write more
+                            ; than 10 characters (prevents overflowing into other
+                            ; parts of the header).
+        bne _hdr_sn        ; If Y < 10 and we haven't hit $FF, keep going.
+
+_hdr_wave
+        ; -- "WV:" (waveform) at columns 14-16 --
+        lda #$17           ; Screen code for 'W' (letter 23 = $17).
+        sta SCREEN+14
+        lda #$16           ; Screen code for 'V' (letter 22 = $16).
+        sta SCREEN+15
+        lda #$3a           ; ':'.
+        sta SCREEN+16
+
+        ; -- Waveform name (starting at column 17) --
+        ldx wave_idx
+        lda wname_ptr_lo,x
+        sta ptr_lo
+        lda wname_ptr_hi,x
+        sta ptr_hi
+        ldy #0
+_hdr_wn lda (ptr_lo),y
+        cmp #$ff
+        beq _hdr_filt
+        sta SCREEN+17,y
+        iny
+        cpy #5
+        bne _hdr_wn
+
+_hdr_filt
+        ; -- "F:" (filter) at columns 23-24, then ON or -- --
+        lda #$06           ; Screen code for 'F' (letter 6 = $06).
+        sta SCREEN+23
+        lda #$3a           ; ':'.
+        sta SCREEN+24
+
+        lda filt_on
+        beq _hdr_foff      ; Filter off? Jump to the "off" display.
+
+        ; Filter ON: display "ON "
+        lda #$0f           ; Screen code for 'O' (letter 15 = $0F).
+        sta SCREEN+25
+        lda #$0e           ; Screen code for 'N' (letter 14 = $0E).
+        sta SCREEN+26
+        lda #$20           ; Space (clears any leftover character from longer text).
+        sta SCREEN+27
+        jmp _hdr_snd       ; Skip the "off" display.
+
+_hdr_foff
+        ; Filter OFF: display "--"
+        lda #$2d           ; Screen code for '-'.
+        sta SCREEN+25
+        sta SCREEN+26      ; Two dashes.
+        lda #$20
+        sta SCREEN+27
+
+_hdr_snd
+        ; -- Sound indicator at column 29 --
+        ; A single filled block when sound is on, or a blank space when muted.
+        ; This gives a quick visual "LED" for the sound state.
+        lda sounding
+        beq _hdr_mute
+        lda #$a0           ; $A0 = reverse space (a filled solid block).
+                            ; "Reverse" characters are the inverted versions:
+                            ; screen codes $80-$FF mirror $00-$7F but inverted.
+                            ; $A0 (reverse of $20/space) appears as a solid filled cell.
+        sta SCREEN+29
+        jmp _hdr_sep
+_hdr_mute
+        lda #$20           ; Space = blank (no visual indicator when muted).
+        sta SCREEN+29
+
+_hdr_sep
+        ; -- Row 1: a horizontal line across the full width --
+        ; Row 1 starts at SCREEN+40 (since row 0 is 40 bytes).
+        ldx #39            ; X counts from 39 down to 0 (40 columns).
+        lda #$43           ; Screen code $43 = a horizontal line character
+                            ; (part of the C64's built-in character set).
+_sep    sta SCREEN+40,x   ; Write the line character to column X of row 1.
+        dex
+        bpl _sep           ; BPL: loop while X >= 0. When X becomes $FF (-1),
+                            ; bit 7 is set, N=1, BPL doesn't branch. Loop ends.
+                            ; This covers X = 39, 38, 37, ... 1, 0 (all 40 columns).
+
+        ; -- Set the header text color to light green --
+        ldx #39
+        lda #$0d           ; Color $0D = light green.
+_hcol   sta COLRAM,x       ; Set color for row 0, column X.
+        sta COLRAM+40,x    ; Set color for row 1, column X.
+        dex
+        bpl _hcol          ; Same loop pattern.
+        rts
+
+; --- Draw crosshair lines for all three voices ---
+;
+; Instead of a single cursor dot, we draw CROSSHAIR LINES across the
+; entire play area. This makes it easy to see exactly where each voice
+; sits on the X/Y pitch grid:
+;
+;   Voice 1 (X axis):  a VERTICAL line at pos_x, drawn in light blue.
+;   Voice 2 (Y axis):  a HORIZONTAL line at pos_y, drawn in light green.
+;   Voice 3 (Y+offset): a HORIZONTAL line at v3_scr, drawn in yellow.
+;
+; Where two lines cross, we place a "+" character in white to mark the
+; intersection point.
+;
+; DRAWING ORDER MATTERS:
+;   1. Erase all old lines (write spaces over previous positions).
+;   2. Draw voice 3's horizontal line (yellow) first.
+;   3. Draw voice 2's horizontal line (green) on top -- if V2 and V3
+;      share a row, green wins (V2 is the "primary" Y voice).
+;   4. Draw voice 1's vertical line (blue) last -- it overwrites the
+;      horizontal characters at intersection points.
+;   5. Fix intersections: place cross characters where lines meet.
+;
+; This layering ensures the most important visual (the V1/V2 crosshair)
+; is always visible, even when V3 overlaps.
+
+draw_crosshairs
+        ; -- Compute voice 3's screen row --
+        ; Voice 3's pitch is derived from pos_y minus a per-scale offset
+        ; (v3_step). Because voice 3 is at a higher pitch than voice 2,
+        ; its crosshair line appears ABOVE voice 2's line on screen.
+        ; If the subtraction goes negative, V3 is off the top of the
+        ; play area and we mark it as $FF (invisible).
+        ldx cur_scale      ; X = current scale index (0-5).
+        lda pos_y          ; A = cursor's play-area row (0-22).
+        sec                ; SEC before SBC, as always.
+        sbc v3_step,x      ; A = pos_y - v3_step[cur_scale].
+                            ; Indexed addressing: the offset for this scale is at
+                            ; address (v3_step + X). For major scale (X=1), v3_step
+                            ; is 4, so if pos_y=11, A = 11-4 = 7.
+                            ; SBC sets the Carry flag: C=1 means no borrow (result >= 0),
+                            ; C=0 means borrow occurred (result went negative).
+        bcc _v3_off        ; BCC: if Carry is clear, the result was negative.
+                            ; That means V3's row would be above the play area (row < 0).
+        sta v3_scr          ; Result is valid (0-22). Save it.
+        jmp _v3_done        ; Skip the off-screen path.
+_v3_off lda #$ff           ; $FF is our sentinel for "off-screen."
+        sta v3_scr          ; Mark V3 as not visible this frame.
+_v3_done
+
+        ; === ERASE OLD LINES ===
+        ; Before drawing new crosshairs, we must erase the old ones by
+        ; writing spaces over them. We erase in any order because we're
+        ; just blanking everything -- the drawing order only matters when
+        ; we put new characters down.
+        ;
+        ; Note: we only need to write space characters. The color RAM
+        ; doesn't matter for spaces because a space character is blank
+        ; regardless of its color.
+
+        ; -- Erase old V1 vertical line at prev_x --
+        ; This fills column prev_x with spaces across all 23 play-area rows.
+        ldy prev_x         ; Y = the column where V1's vertical line was last frame.
+        lda #$20            ; A = space character (screen code for blank).
+        jsr vline_char      ; Call the vertical-line drawing subroutine.
+                            ; It writes the character in A to column Y across
+                            ; screen rows 2-24 (the full play area).
+
+        ; -- Erase old V2 horizontal line at prev_y --
+        ; This fills the entire row at prev_y with spaces.
+        lda prev_y          ; A = play-area row where V2's line was last frame.
+        clc
+        adc #2              ; Convert play-area row (0-22) to screen row (2-24).
+                            ; The play area starts at screen row 2 because rows
+                            ; 0 and 1 are used by the status header.
+        jsr hline_erase     ; Call the horizontal-line erase subroutine.
+                            ; It looks up the screen row address and fills all
+                            ; 40 columns with spaces.
+
+        ; -- Erase old V3 horizontal line at prev_v3scr --
+        lda prev_v3scr      ; A = play-area row where V3's line was last frame.
+        cmp #$ff            ; Was V3 off-screen last frame?
+                            ; CMP sets Z=1 if A equals $FF.
+        beq _skip_ev3       ; BEQ: if it was $FF, there's nothing to erase. Skip.
+        clc
+        adc #2              ; Convert play-area row to screen row.
+        jsr hline_erase     ; Erase the old V3 horizontal line.
+_skip_ev3
+
+        ; === DRAW NEW LINES ===
+        ; Now we draw the new crosshairs. Order matters here: things drawn
+        ; later overwrite things drawn earlier at the same position.
+
+        ; -- Draw V3 horizontal line in yellow --
+        ; We draw V3 FIRST so that if V2 and V3 share a row, V2's green
+        ; line will overwrite V3's yellow line (V2 is drawn second).
+        lda v3_scr          ; A = V3's current play-area row.
+        cmp #$ff            ; Is V3 off-screen this frame?
+        beq _skip_dv3       ; If yes, skip drawing it entirely.
+        clc
+        adc #2              ; Convert to screen row number.
+        tax                 ; TAX: transfer A to X. X = screen row number.
+                            ; We need it in X to index the row address table.
+
+        ; Look up the screen memory address for this row.
+        lda row_lo,x        ; Low byte of the row's starting address.
+        sta ptr_lo
+        lda row_hi,x        ; High byte.
+        sta ptr_hi           ; ptr_lo/ptr_hi now point to the start of this screen row.
+
+        lda #$43            ; Screen code $43 = horizontal line character.
+                            ; This is one of the C64's built-in PETSCII graphics
+                            ; characters -- a thin horizontal bar.
+        jsr hline_fill       ; Fill all 40 columns of this row with the line character.
+                            ; hline_fill writes A to (ptr_lo),y for Y = 39 down to 0.
+
+        ; Now set the COLOR of this row to yellow.
+        ; Color RAM mirrors screen memory but at $D800 instead of $0400.
+        ; To convert our screen pointer to a color RAM pointer, we add
+        ; ($D8 - $04) = $D4 to the high byte. The low byte stays the same
+        ; because the column offset within the row doesn't change.
+        lda ptr_hi           ; Reload the high byte of the screen row address.
+        clc
+        adc #($d8-$04)      ; Add $D4 to convert screen address -> color RAM address.
+                            ; The assembler evaluates ($D8-$04) at assembly time.
+                            ; For example, if ptr_hi was $05 (screen row at $05xx),
+                            ; it becomes $D9 (color RAM at $D9xx).
+        sta ptr_hi           ; ptr now points to the color RAM row.
+
+        lda #$07            ; Color $07 = yellow.
+        jsr hline_fill       ; Fill the color RAM row with yellow.
+                            ; We reuse the same hline_fill routine -- it doesn't care
+                            ; whether the pointer is aimed at screen RAM or color RAM.
+                            ; It just writes A to 40 consecutive bytes at the pointer.
+_skip_dv3
+
+        ; -- Draw V2 horizontal line in light green --
+        ; V2 is drawn AFTER V3 so it takes visual priority at overlaps.
+        lda pos_y           ; A = current play-area row for V2.
+        clc
+        adc #2              ; Convert to screen row.
+        tax                 ; X = screen row number.
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        sta ptr_hi           ; ptr points to this screen row.
+
+        lda #$43            ; Horizontal line character (same as V3).
+        jsr hline_fill       ; Fill the row with line characters.
+
+        ; Set color to light green.
+        lda ptr_hi
+        clc
+        adc #($d8-$04)      ; Convert screen pointer to color RAM pointer.
+        sta ptr_hi
+        lda #$0d            ; Color $0D = light green.
+        jsr hline_fill       ; Fill the color RAM row with light green.
+
+        ; -- Draw V1 vertical line in light blue --
+        ; V1 is drawn LAST so its vertical line character overwrites the
+        ; horizontal line characters where they intersect. This creates
+        ; the visual effect of the vertical line "on top of" the horizontals.
+        ldy pos_x           ; Y = current column for V1.
+        lda #$5d            ; Screen code $5D = vertical line character.
+                            ; This is the C64's built-in thin vertical bar.
+        jsr vline_char       ; Draw vertical line characters down the entire
+                            ; play area (rows 2-24) at column Y.
+
+        ; Set the vertical line's color to light blue.
+        ldy pos_x           ; Y = column (reload because vline_char may have
+                            ; changed Y -- actually it preserves Y, but we reload
+                            ; to be safe and clear about what Y holds here).
+        lda #$0e            ; Color $0E = light blue.
+        jsr vline_colr       ; Fill color RAM for this column with light blue.
+                            ; vline_colr is like vline_char but writes to color RAM
+                            ; instead of screen memory.
+
+        ; === FIX INTERSECTIONS ===
+        ; Where the vertical line (V1) crosses a horizontal line (V2 or V3),
+        ; we want to show a "+" cross character instead of just the vertical
+        ; bar. This makes the intersection points clearly visible.
+
+        ; -- V1 x V2 intersection at (pos_y+2, pos_x) --
+        ; This is where V1's vertical line crosses V2's horizontal line.
+        lda pos_y
+        clc
+        adc #2              ; Screen row for V2's horizontal line.
+        tax                 ; X = screen row.
+        lda row_lo,x        ; Look up the row's screen memory address.
+        sta ptr_lo
+        lda row_hi,x
+        sta ptr_hi
+        ldy pos_x           ; Y = column where V1's vertical line is.
+        lda #$5b            ; Screen code $5B = cross/plus character (+).
+                            ; This replaces whatever was at this cell (which was
+                            ; the vertical line character from the V1 drawing step).
+        sta (ptr_lo),y       ; Write the cross character at the intersection.
+                            ; Indirect indexed addressing: the pointer gives the
+                            ; row's base address, Y gives the column offset.
+
+        ; Set the intersection color to white for maximum visibility.
+        lda ptr_hi
+        clc
+        adc #($d8-$04)      ; Convert to color RAM pointer.
+        sta ptr_hi
+        lda #$01            ; Color $01 = white.
+        sta (ptr_lo),y       ; Write white to this cell's color RAM.
+                            ; Y still holds pos_x -- STA doesn't change Y.
+
+        ; -- V1 x V3 intersection at (v3_scr+2, pos_x) --
+        ; Only draw this if V3 is on-screen.
+        lda v3_scr
+        cmp #$ff            ; Is V3 off-screen?
+        beq _skip_xv3       ; If yes, no intersection to draw.
+        clc
+        adc #2              ; Convert V3's play-area row to screen row.
+        tax
+        lda row_lo,x        ; Look up V3's row address.
+        sta ptr_lo
+        lda row_hi,x
+        sta ptr_hi
+        ldy pos_x           ; Y = V1's column.
+        lda #$5b            ; Cross character.
+        sta (ptr_lo),y       ; Draw cross at V1 x V3 intersection.
+        lda ptr_hi
+        clc
+        adc #($d8-$04)      ; Convert to color RAM.
+        sta ptr_hi
+        lda #$01            ; White.
+        sta (ptr_lo),y       ; Set intersection color.
+_skip_xv3
+
+        ; -- Update previous-frame tracking --
+        ; Save v3_scr so that next frame we know where to erase V3's line.
+        ; (prev_x and prev_y are already updated at the top of read_joystick.)
+        lda v3_scr
+        sta prev_v3scr
+        rts
+
+; --- Fill a screen row with spaces (erase a horizontal line) ---
+; Input: A = screen row number (0-24)
+;
+; This is a helper that looks up the row address from the table and then
+; falls through into hline_fill with A=$20 (space). "Falling through"
+; means we don't use JMP or JSR to reach hline_fill -- we simply let
+; execution continue into the next routine's code. This saves 3 bytes
+; (no JMP instruction needed) and 3 CPU cycles. It's a common 6502
+; optimization, but it means the two routines MUST be adjacent in memory.
+hline_erase
+        tax                 ; TAX: transfer A to X. X = screen row number.
+                            ; We need the row number in X to index the row_lo/row_hi
+                            ; lookup tables.
+        lda row_lo,x        ; Load the low byte of this row's screen address.
+        sta ptr_lo
+        lda row_hi,x        ; Load the high byte.
+        sta ptr_hi           ; ptr_lo/ptr_hi now point to the start of this row.
+        lda #$20            ; A = $20 = space character.
+        ; FALL THROUGH into hline_fill.
+        ; There is no RTS or JMP here. The CPU just continues executing
+        ; the next instruction, which is the first instruction of hline_fill.
+        ; hline_fill will write A (space) to all 40 columns and then RTS,
+        ; which returns to OUR caller. This works because hline_fill's RTS
+        ; pops the return address that was pushed by the JSR that called us.
+
+; --- Fill 40 columns at ptr with the character/color in A ---
+; Input: ptr_lo/ptr_hi = start of the row
+;        A = the byte to fill (could be a screen character or a color value)
+;
+; This routine is used for both drawing line characters and setting colors,
+; because the operation is the same: write one byte to 40 consecutive
+; memory locations. We just aim the pointer at screen RAM or color RAM
+; depending on what we need.
+hline_fill
+        ldy #39             ; Y = 39 (the last column). We count DOWN to 0.
+                            ; Counting down is more efficient on the 6502 because
+                            ; DEY sets the Z flag when Y reaches 0, which is the
+                            ; natural loop termination condition. Counting up would
+                            ; require a separate CPY #40 comparison each iteration.
+_hfl    sta (ptr_lo),y      ; Write A at column Y of this row.
+                            ; Indirect indexed addressing: the effective address is
+                            ; (ptr_lo/ptr_hi) + Y. On the first iteration Y=39, so
+                            ; this writes to the 40th byte of the row (rightmost column).
+        dey                 ; DEY: decrement Y by 1. Sets Z when Y becomes 0.
+                            ; But wait -- when Y=0, we still need to write to column 0!
+                            ; BPL checks the N (negative) flag, not the Z flag.
+        bpl _hfl            ; BPL: branch if N=0 (Y >= 0). When Y goes from 0 to $FF
+                            ; (255 unsigned = -1 signed), bit 7 is set, so N=1 and
+                            ; BPL doesn't branch. This means the loop body runs for
+                            ; Y = 39, 38, 37, ... 1, 0 -- all 40 columns are filled.
+        rts
+
+; --- Fill a vertical column with a character ---
+; Input: Y = column number (0-39), A = character to write
+;
+; This fills one column across the entire play area (screen rows 2-24,
+; which is 23 rows). Unlike horizontal fills, we can't just increment
+; an index register -- each row is 40 bytes apart, and 40 doesn't fit
+; in a simple indexed offset. Instead, we use a pointer and manually
+; add 40 to it after each row.
+;
+; The pointer starts at the address of screen row 2 (the first play-area
+; row) and advances by 40 bytes each iteration to reach the next row.
+vline_char
+        sta tmp             ; Save the character in tmp. We'll reload it each
+                            ; iteration because the pointer arithmetic clobbers A.
+        lda row_lo+2        ; Load the low byte of screen row 2's address.
+                            ; "row_lo+2" means the THIRD entry (index 2) in the
+                            ; row_lo table, which is the address of screen row 2.
+        sta ptr_lo
+        lda row_hi+2        ; High byte of screen row 2.
+        sta ptr_hi           ; ptr now points to the start of screen row 2.
+
+        ldx #23             ; X = loop counter. 23 rows to fill (rows 2 through 24).
+_vcl    lda tmp             ; Reload the character from tmp.
+                            ; We need to reload each time because the pointer
+                            ; arithmetic below uses A for addition.
+        sta (ptr_lo),y       ; Write the character at column Y of the current row.
+                            ; Y holds the column number and stays constant through
+                            ; the entire loop. Only the pointer (the row) changes.
+
+        ; Advance the pointer to the next row: add 40 to ptr_lo/ptr_hi.
+        ; This is 16-bit addition done in two steps (low byte, then high byte).
+        lda ptr_lo           ; Load the low byte of the current pointer.
+        clc
+        adc #40             ; Add 40 (one row width).
+        sta ptr_lo           ; Store the new low byte.
+        bcc +                ; BCC: if Carry is clear, no overflow from the low byte.
+                            ; Skip the high byte increment.
+                            ; If Carry is set, the low byte wrapped past $FF, and we
+                            ; need to add 1 to the high byte (carry propagation).
+        inc ptr_hi           ; Increment the high byte by 1 (carry from low byte).
++       dex                 ; DEX: decrement the row counter.
+        bne _vcl            ; BNE: if X is not zero, loop for the next row.
+                            ; When X reaches 0, we've written to all 23 rows.
+        rts
+
+; --- Fill a vertical column with a color ---
+; Input: Y = column number (0-39), A = color value (0-15)
+;
+; This is nearly identical to vline_char, but writes to COLOR RAM
+; instead of screen memory. The difference is that we start the pointer
+; at the color RAM address for row 2 instead of the screen RAM address.
+;
+; To convert screen row addresses to color RAM addresses, we add
+; ($D8-$04) = $D4 to the high byte. The low byte is the same because
+; screen RAM and color RAM have the same layout (40 bytes per row).
+vline_colr
+        sta tmp             ; Save the color value.
+        lda row_lo+2        ; Low byte of row 2's address (same as screen RAM).
+        sta ptr_lo
+        lda row_hi+2        ; High byte of row 2's screen address.
+        clc
+        adc #($d8-$04)      ; Add $D4 to convert to color RAM.
+                            ; If row 2's screen address high byte is $04,
+                            ; this becomes $04 + $D4 = $D8 (color RAM start).
+        sta ptr_hi           ; ptr now points to color RAM row 2.
+
+        ldx #23             ; 23 rows to fill.
+_vrl    lda tmp             ; Reload color value.
+        sta (ptr_lo),y       ; Write color at column Y of current color RAM row.
+
+        ; Advance pointer to next row (same +40 logic as vline_char).
+        lda ptr_lo
+        clc
+        adc #40
+        sta ptr_lo
+        bcc +
+        inc ptr_hi
++       dex
+        bne _vrl
+        rts
+
+; =====================================================================
+; INTRO SCREEN
+; =====================================================================
+; This routine displays the help/controls screen before the game begins.
+; It uses a TABLE-DRIVEN RENDERER: instead of writing each character
+; with separate LDA/STA instructions (which would use ~5 bytes per char),
+; we store all the text in a compact data table and use a generic loop
+; to render it. The data format is:
+;   [row, col, text..., $00]  (one entry per string)
+;   $ff                        (end-of-table marker)
+;
+; This is a powerful pattern. ~280 bytes of string data plus ~80 bytes
+; of rendering code replaces what would be ~1400 bytes of hardcoded
+; LDA/STA pairs. On a 64KB machine, saving 1000+ bytes matters.
+;
+; We use two zero-page pointer pairs:
+;   ptr_lo/ptr_hi ($fb/$fc)  = SOURCE pointer walking through intro_data
+;   prev_x/prev_y ($fd/$fe)  = DESTINATION pointer into screen RAM
+; Both are safe to repurpose here because interrupts are disabled (SEI)
+; and the game state hasn't been initialized yet.
+show_intro
+        lda #<intro_data        ; Load low byte of intro_data's address.
+        sta ptr_lo              ; ptr_lo = low byte of source.
+        lda #>intro_data        ; Load high byte.
+        sta ptr_hi              ; ptr_hi = high byte. ptr now points to intro_data.
+                                ;
+                                ; The < and > operators are ASSEMBLER EXPRESSIONS:
+                                ;   < extracts the low byte of a 16-bit address
+                                ;   > extracts the high byte
+                                ; Since 6502 memory addresses are 16-bit but registers
+                                ; are 8-bit, we must load addresses in two halves.
+
+        ; --- Render strings from the data table ---
+_si_entry
+        ldy #0                  ; Y = 0 for all indirect indexed reads: (ptr),y
+        lda (ptr_lo),y          ; Read the next byte from the data stream.
+                                ; This is the row number (0-24) or $ff.
+        cmp #$ff                ; Is it the end-of-table marker?
+        beq _si_color           ; Yes -- all strings rendered, go apply colors.
+        tax                     ; X = row number (save for row_lo/row_hi lookup).
+
+        inc ptr_lo              ; Advance source pointer past the row byte.
+        bne +                   ; If low byte didn't wrap to 0, skip high byte inc.
+        inc ptr_hi              ; Low byte wrapped: carry into high byte.
++
+        lda (ptr_lo),y          ; Read the column number.
+        inc ptr_lo              ; Advance past column byte.
+        bne +
+        inc ptr_hi
++
+        ; Compute the screen address: row_base + column.
+        ; row_lo[X] / row_hi[X] gives us the address of column 0 of row X.
+        ; Adding the column byte gives us the exact character cell.
+        clc
+        adc row_lo,x            ; Add column to row's low byte.
+        sta prev_x              ; Store as destination pointer low byte.
+        lda row_hi,x            ; Get row's high byte.
+        adc #0                  ; Add carry from the low-byte addition.
+        sta prev_y              ; Destination pointer is now set.
+
+        ; Copy characters from source to screen until we hit $00.
+_si_str lda (ptr_lo),y          ; Read next character from data (Y is still 0).
+        beq _si_nxt             ; $00 = end of this string entry.
+        sta (prev_x),y          ; Write the character to screen RAM.
+                                ; (prev_x),y with Y=0 means: write to the address
+                                ; stored in prev_x/prev_y.
+
+        ; Advance source pointer.
+        inc ptr_lo
+        bne +
+        inc ptr_hi
+
+        ; Advance destination pointer to next screen column.
++       inc prev_x              ; Move to next column.
+        bne _si_str             ; If no page crossing, loop back.
+        inc prev_y              ; Page crossed: increment high byte.
+        jmp _si_str             ; Continue copying.
+
+_si_nxt ; We've hit the $00 terminator. Skip past it and start the next entry.
+        inc ptr_lo
+        bne +
+        inc ptr_hi
++       jmp _si_entry           ; Go read the next [row, col, text..., $00] entry.
+
+        ; --- Apply per-row colors ---
+        ; The intro_clr table has [row, color] pairs. For each pair, we fill
+        ; that entire screen row's color RAM with the specified color.
+        ; This is simpler than per-character coloring and works because the
+        ; intro layout puts related items on the same row.
+_si_color
+        lda #<intro_clr         ; Point source at the color table.
+        sta ptr_lo
+        lda #>intro_clr
+        sta ptr_hi
+
+_si_crow
+        ldy #0
+        lda (ptr_lo),y          ; Read row number.
+        cmp #$ff                ; End of color table?
+        beq _si_wait            ; Yes -- go wait for user input.
+        tax                     ; X = row.
+        inc ptr_lo
+        bne +
+        inc ptr_hi
++
+        lda (ptr_lo),y          ; Read color value.
+        sta tmp                 ; Save it (we need A for address math).
+        inc ptr_lo
+        bne +
+        inc ptr_hi
++
+        ; Compute color RAM address for this row.
+        ; Color RAM mirrors screen RAM layout but starts at $D800 instead
+        ; of $0400. Adding ($D8-$04) = $D4 to the high byte converts
+        ; a screen address to its color RAM equivalent.
+        lda row_lo,x
+        sta prev_x
+        lda row_hi,x
+        clc
+        adc #($d8-$04)          ; Convert screen high byte to color RAM.
+        sta prev_y
+
+        lda tmp                 ; Reload the color value.
+        ldy #39                 ; Fill all 40 columns (39 down to 0).
+_si_ccl sta (prev_x),y          ; Write color to column Y.
+        dey                     ; Y = Y - 1.
+        bpl _si_ccl             ; BPL loops while Y >= 0 (bit 7 clear).
+                                ; When Y goes from 0 to $FF (-1), bit 7 is set,
+                                ; so BPL falls through. This fills columns 39..0.
+        jmp _si_crow            ; Next color table entry.
+
+        ; --- Wait for space bar ---
+        ; We use the KERNAL's GETIN routine to check for key presses.
+        ; This polls the keyboard buffer and returns the key code in A,
+        ; or 0 if no key is pressed.
+_si_wait
+        jsr KERNAL_GETIN        ; Read keyboard.
+        cmp #$20                ; Is it space ($20)?
+        bne _si_wait            ; No -- keep waiting.
+        rts                     ; Space pressed -- return to caller.
+
+; =====================================================================
+; DATA TABLES
+; =====================================================================
+; Everything below here is DATA, not code. The assembler places these
+; bytes into the output file at the current address, just like code.
+; The CPU would try to execute them as instructions if it ever reached
+; here (which it won't, because the main loop runs forever).
+
+; --- Waveform control register values ---
+; Each byte represents a SID waveform. The gate bit (bit 0) is NOT
+; included here; it's added or removed by set_gates.
+wave_cr
+        .byte $10          ; Index 0: $10 = %00010000 = Triangle waveform.
+                            ; Triangle: smooth, mellow, flute-like sound.
+        .byte $20          ; Index 1: $20 = %00100000 = Sawtooth waveform.
+                            ; Sawtooth: bright, buzzy, rich in harmonics.
+        .byte $40          ; Index 2: $40 = %01000000 = Pulse waveform.
+                            ; Pulse: hollow, clarinet-like. Timbre varies with pulse width.
+        .byte $80          ; Index 3: $80 = %10000000 = Noise waveform.
+                            ; Noise: random, used for drums and sound effects.
+
+; --- Waveform names ---
+; Stored as SCREEN CODES (not PETSCII), terminated with $FF.
+; The .enc "screen" directive tells 64tass to use screen code encoding
+; when processing .text strings. Without this, .text would use PETSCII,
+; and the characters would appear garbled on screen.
+        .enc "screen"      ; ASSEMBLER DIRECTIVE: switch text encoding to screen codes.
+wn_tri  .text "TRI"       ; .text emits a string of bytes using the current encoding.
+        .byte $ff          ; String terminator. We use $FF instead of $00 because
+                            ; $00 is a valid screen code (the '@' character).
+wn_saw  .text "SAW"
+        .byte $ff
+wn_pls  .text "PLS"
+        .byte $ff
+wn_noi  .text "NOI"
+        .byte $ff
+
+; Pointer tables for waveform names.
+; The < operator extracts the LOW byte of an address.
+; The > operator extracts the HIGH byte of an address.
+; Example: if wn_tri is at address $0A23, then <wn_tri = $23, >wn_tri = $0A.
+wname_ptr_lo
+        .byte <wn_tri, <wn_saw, <wn_pls, <wn_noi
+wname_ptr_hi
+        .byte >wn_tri, >wn_saw, >wn_pls, >wn_noi
+
+; --- Scale interval tables ---
+; Each byte is a semitone offset within one octave (0-11).
+; These define which notes are "in" the scale.
+;
+; A SEMITONE is the smallest step on a piano -- one key to the next.
+; An OCTAVE is 12 semitones. The notes within an octave are:
+;   0=C, 1=C#, 2=D, 3=D#, 4=E, 5=F, 6=F#, 7=G, 8=G#, 9=A, 10=A#, 11=B
+;
+; A SCALE selects certain notes from these 12. For example:
+;   Major scale: C D E F G A B = semitones 0, 2, 4, 5, 7, 9, 11
+;   That pattern of gaps (2,2,1,2,2,2,1) is what makes it sound "major."
+
+sc_chrom  .byte 0,1,2,3,4,5,6,7,8,9,10,11  ; Chromatic: ALL 12 semitones.
+sc_major  .byte 0,2,4,5,7,9,11              ; Major (Ionian): the "happy" scale.
+sc_minor  .byte 0,2,3,5,7,8,10              ; Natural minor (Aeolian): the "sad" scale.
+sc_penta  .byte 0,2,4,7,9                   ; Major pentatonic: 5-note scale. Can't sound bad.
+sc_whole  .byte 0,2,4,6,8,10                ; Whole tone: dreamy, Debussy-esque. All gaps are 2.
+sc_dorian .byte 0,2,3,5,7,9,10              ; Dorian: minor but with a raised 6th. Jazzy.
+
+; Number of notes per octave in each scale.
+; Used by degree_to_semi to know when to wrap to the next octave.
+scale_len
+        .byte 12, 7, 7, 5, 6, 7
+
+; Voice 3 offset in scale degrees. Chosen per-scale to land on the most
+; consonant interval available. For most scales this is a perfect fifth.
+; The whole tone scale has no fifth, so we use 3 steps (a tritone).
+;              chrom maj min pent whole dorian
+v3_step .byte  7,    4,  4,  3,   3,    4
+
+; Pointer tables for scale interval data.
+scale_ptr_lo
+        .byte <sc_chrom, <sc_major, <sc_minor
+        .byte <sc_penta, <sc_whole, <sc_dorian
+scale_ptr_hi
+        .byte >sc_chrom, >sc_major, >sc_minor
+        .byte >sc_penta, >sc_whole, >sc_dorian
+
+; --- Scale names (screen codes, $FF terminated) ---
+; Padded with spaces to 9 characters so that switching from a long name
+; (like "CHROMATIC") to a short one (like "MAJOR") overwrites the old
+; characters completely instead of leaving leftover letters.
+sn_chr  .text "CHROMATIC"
+        .byte $ff
+sn_maj  .text "MAJOR    "
+        .byte $ff
+sn_min  .text "MINOR    "
+        .byte $ff
+sn_pen  .text "PENTA    "
+        .byte $ff
+sn_whl  .text "WHOLETONE"
+        .byte $ff
+sn_dor  .text "DORIAN   "
+        .byte $ff
+        .enc "none"        ; ASSEMBLER DIRECTIVE: reset encoding back to default (PETSCII).
+
+; --- Intro screen string data ---
+; This is the data table consumed by show_intro's rendering loop.
+; Format: [row, col, text_bytes..., $00] repeated for each string.
+; $ff marks the end of the entire table.
+;
+; Each entry tells the renderer: "draw this text starting at screen
+; row R, column C." The $00 byte ends one string so the renderer
+; knows to read the next [row, col] header. The $ff byte tells it
+; there are no more strings.
+        .enc "screen"           ; Text must be in screen codes for screen RAM.
+intro_data
+        .byte 1, 14
+        .text "MM"
+        .byte $00
+        .byte 4, 7
+        .text "INSPIRED BY LAURIE SPIEGEL"
+        .byte $00
+        .byte 6, 3
+        .text "CONTROLS"
+        .byte $00
+        .byte 8, 3
+        .text "JOYSTICK"
+        .byte $00
+        .byte 8, 20
+        .text "MOVE CURSOR"
+        .byte $00
+        .byte 9, 3
+        .text "SPACE"
+        .byte $00
+        .byte 9, 20
+        .text "TOGGLE SOUND"
+        .byte $00
+        .byte 10, 3
+        .text "1-6"
+        .byte $00
+        .byte 10, 20
+        .text "SELECT SCALE"
+        .byte $00
+        .byte 11, 3
+        .text "W / S"
+        .byte $00
+        .byte 11, 20
+        .text "CYCLE WAVEFORM"
+        .byte $00
+        .byte 12, 3
+        .text "Q / E"
+        .byte $00
+        .byte 12, 20
+        .text "V3 OCTAVE -/+"
+        .byte $00
+        .byte 13, 3
+        .text ", / ."
+        .byte $00
+        .byte 13, 20
+        .text "FILTER CUTOFF"
+        .byte $00
+        .byte 14, 3
+        .text "F"
+        .byte $00
+        .byte 14, 20
+        .text "TOGGLE FILTER"
+        .byte $00
+        .byte 17, 3
+        .text "SCALES"
+        .byte $00
+        .byte 18, 3
+        .text "1 CHROMATIC"
+        .byte $00
+        .byte 18, 20
+        .text "2 MAJOR"
+        .byte $00
+        .byte 19, 3
+        .text "3 MINOR"
+        .byte $00
+        .byte 19, 20
+        .text "4 PENTATONIC"
+        .byte $00
+        .byte 20, 3
+        .text "5 WHOLETONE"
+        .byte $00
+        .byte 20, 20
+        .text "6 DORIAN"
+        .byte $00
+        .byte 23, 10
+        .text "PRESS SPACE TO BEGIN"
+        .byte $00
+        .byte $ff
+        .enc "none"
+
+; --- Intro screen row color table ---
+; Format: [row, color] pairs. For each pair, the renderer fills
+; the ENTIRE row's color RAM with that color value. Using whole-row
+; fills keeps the data compact (2 bytes per row vs 2 bytes per char).
+intro_clr
+        .byte 1, $01            ; white
+        .byte 2, $01            ; white
+        .byte 4, $0c            ; mid gray
+        .byte 6, $0d            ; light green
+        .byte 8, $0e            ; light blue
+        .byte 9, $0e
+        .byte 10, $0e
+        .byte 11, $0e
+        .byte 12, $0e
+        .byte 13, $0e
+        .byte 14, $0e
+        .byte 17, $0d           ; light green
+        .byte 18, $0e           ; light blue
+        .byte 19, $0e
+        .byte 20, $0e
+        .byte 23, $07           ; yellow
+        .byte $ff
+
+sname_ptr_lo
+        .byte <sn_chr, <sn_maj, <sn_min
+        .byte <sn_pen, <sn_whl, <sn_dor
+sname_ptr_hi
+        .byte >sn_chr, >sn_maj, >sn_min
+        .byte >sn_pen, >sn_whl, >sn_dor
+
+; --- Screen row address lookup tables ---
+; The VIC-II screen is a flat 1000-byte buffer, but we want to treat it
+; as a 2D grid (row, column). To write to row R, column C, we need the
+; memory address: SCREEN + (R * 40) + C.
+;
+; The 6502 cannot multiply, so we PRECOMPUTE (SCREEN + R*40) for every
+; row and store them in a lookup table. Then to access any cell, we just
+; load the row address from the table and add the column as an offset
+; (using indexed addressing).
+;
+; Since each address is 16 bits but the 6502 can only load 8 bits at a
+; time, we split the table into two: one for low bytes, one for high bytes.
+; This is the same "split pointer table" pattern used for scale and name
+; pointers.
+row_lo
+        .byte <(SCREEN+ 0*40), <(SCREEN+ 1*40), <(SCREEN+ 2*40)
+        .byte <(SCREEN+ 3*40), <(SCREEN+ 4*40), <(SCREEN+ 5*40)
+        .byte <(SCREEN+ 6*40), <(SCREEN+ 7*40), <(SCREEN+ 8*40)
+        .byte <(SCREEN+ 9*40), <(SCREEN+10*40), <(SCREEN+11*40)
+        .byte <(SCREEN+12*40), <(SCREEN+13*40), <(SCREEN+14*40)
+        .byte <(SCREEN+15*40), <(SCREEN+16*40), <(SCREEN+17*40)
+        .byte <(SCREEN+18*40), <(SCREEN+19*40), <(SCREEN+20*40)
+        .byte <(SCREEN+21*40), <(SCREEN+22*40), <(SCREEN+23*40)
+        .byte <(SCREEN+24*40)
+row_hi
+        .byte >(SCREEN+ 0*40), >(SCREEN+ 1*40), >(SCREEN+ 2*40)
+        .byte >(SCREEN+ 3*40), >(SCREEN+ 4*40), >(SCREEN+ 5*40)
+        .byte >(SCREEN+ 6*40), >(SCREEN+ 7*40), >(SCREEN+ 8*40)
+        .byte >(SCREEN+ 9*40), >(SCREEN+10*40), >(SCREEN+11*40)
+        .byte >(SCREEN+12*40), >(SCREEN+13*40), >(SCREEN+14*40)
+        .byte >(SCREEN+15*40), >(SCREEN+16*40), >(SCREEN+17*40)
+        .byte >(SCREEN+18*40), >(SCREEN+19*40), >(SCREEN+20*40)
+        .byte >(SCREEN+21*40), >(SCREEN+22*40), >(SCREEN+23*40)
+        .byte >(SCREEN+24*40)
+
+; --- SID frequency table ---
+; This is a lookup table of 72 frequency values for the SID chip,
+; covering notes C-1 through B-6 (6 octaves, 12 notes per octave).
+;
+; THE SID'S FREQUENCY REGISTER:
+; The SID generates sound using a digital oscillator. Its frequency
+; register is 16 bits (0-65535). The relationship between the register
+; value and the actual pitch in Hz is:
+;
+;   Output_Hz = Register_Value * Clock_Frequency / 16777216
+;
+; On PAL systems, the clock is 985248 Hz. So to produce, say, 440 Hz (A4):
+;   Register = round(440 * 16777216 / 985248) = round(7493.57) = 7494 = $1D46
+;
+; Each entry is a 16-bit word stored in LITTLE-ENDIAN order (low byte first).
+; The .word directive automatically handles this byte ordering.
+;
+; The table doubles with each octave (because each octave doubles the frequency):
+;   C-1 = $022D,  C-2 = $045A (~double), C-3 = $08B4 (~double), ...
+freq_tbl
+        ; Octave 1: C-1 through B-1
+        .word $022d,$024e,$0271,$0296,$02be,$02e8
+        .word $0314,$0343,$0375,$03a9,$03e1,$041c
+        ; Octave 2: C-2 through B-2
+        .word $045a,$049c,$04e2,$052d,$057c,$05cf
+        .word $0628,$0685,$06e8,$0752,$07c1,$0837
+        ; Octave 3: C-3 through B-3
+        .word $08b4,$0939,$09c5,$0a5a,$0af7,$0b9e
+        .word $0c4f,$0d0a,$0dd1,$0ea4,$0f82,$106e
+        ; Octave 4: C-4 through B-4 (middle C is C-4)
+        .word $1168,$1272,$138a,$14b3,$15ee,$173c
+        .word $189e,$1a15,$1ba2,$1d48,$1f04,$20dc
+        ; Octave 5: C-5 through B-5
+        .word $22d0,$24e4,$2714,$2966,$2bdc,$2e78
+        .word $313c,$342a,$3744,$3a90,$3e08,$41b8
+        ; Octave 6: C-6 through B-6
+        .word $45a0,$49c8,$4e28,$52cc,$57b8,$5cf0
+        .word $627c,$6854,$6e88,$7520,$7c10,$8370
