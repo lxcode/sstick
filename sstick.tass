@@ -278,10 +278,6 @@ read_joystick
         lda CIA1_PRA
         sta joy_raw
 
-        ; clear moving flag each frame; _did_move sets it if position changes
-        lda #0
-        sta moving
-
         ; -- rate limiter for directional movement --
         lda move_tmr
         beq _move_ok
@@ -696,6 +692,8 @@ _ar_beat_play
         sta blink_tmr           ; ~120ms white flash
         lda filt_cut
         sta filt_cur
+        lda #0
+        sta moving              ; consume the movement
         ; in percussive mode, gate off first to get a fresh 0->1 attack
         lda retrig
         beq _ar_no_regate
@@ -760,6 +758,7 @@ _ar_beat_advance
         lda #0
         sta voice_mask
         sta blink_tmr
+        sta moving              ; consume stale movement
         lda rhy_mode
         cmp #1
         beq _ar_adv_arp
