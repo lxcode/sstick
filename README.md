@@ -35,7 +35,7 @@ Currently uses joystick, which gives no way to detect speed. As such, chords are
 
 ### Scales
 
-Cycled with S: chromatic, major, minor, pentatonic, wholetone, dorian, minor pentatonic, octatonic, studie ii.
+Cycled with S: chromatic, major, minor, pentatonic, wholetone, dorian, minor pentatonic, octatonic, freygish, studie ii.
 
 ### Waveforms
 
