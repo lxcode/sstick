@@ -58,6 +58,7 @@ beat_voice  = $20      ; current voice in cycle (0-2) for arp/line
 lfsr        = $21      ; 8-bit LFSR state for improvise randomness
 imp_mask    = $22      ; bitmask of active voices for improvise (bits 0-2)
 voice_mask  = $23      ; bitmask of currently gated voices (bits 0-2), set by apply_rhythm
+frame_flag  = $24      ; set by IRQ, cleared by main loop
 ptr_lo      = $fb      ; indirect pointer lo
 ptr_hi      = $fc      ; indirect pointer hi
 prev_x      = $fd      ; previous cursor X (for erase)
@@ -92,13 +93,18 @@ RES_FILT    = SID+$17
 MODE_VOL    = SID+$18
 
 CIA1_PRA    = $dc00
+CIA1_ICR    = $dc0d
 VIC_RASTER  = $d012
+VIC_CTRL    = $d011
+VIC_IRR     = $d019    ; VIC interrupt register (ack by writing 1)
+VIC_IMR     = $d01a    ; VIC interrupt mask register
 VIC_BORDER  = $d020
 VIC_BG      = $d021
 SCREEN      = $0400
 COLRAM      = $d800
 
 KERNAL_GETIN = $ffe4
+IRQ_VEC     = $0314    ; KERNAL IRQ vector (lo/hi)
 
 
 ; =====================================================================
@@ -168,37 +174,65 @@ entry
         sta imp_mask
         sta voice_mask
 
+        lda #0
+        sta frame_flag
+
         jsr sid_init
         jsr draw_header
         jsr draw_crosshairs
 
+        ; set up raster IRQ
+        lda VIC_CTRL
+        and #$7f                ; clear raster bit 8
+        sta VIC_CTRL
+        lda #251                ; trigger on raster line 251
+        sta VIC_RASTER
+        lda #<irq_handler
+        sta IRQ_VEC
+        lda #>irq_handler
+        sta IRQ_VEC+1
+        lda #$01                ; enable raster IRQ
+        sta VIC_IMR
+        lda CIA1_ICR            ; ack any pending CIA IRQ
         cli
 
 ; =====================================================================
-; MAIN LOOP  (synced to raster for ~50/60 Hz)
+; MAIN LOOP  (drawing + keys; SID timing handled by raster IRQ)
 ; =====================================================================
 main_loop
-        ; draw while waiting for raster (variable-cost work done here)
+        ; wait for IRQ to signal a new frame
+_wait   lda frame_flag
+        beq _wait
+        lda #0
+        sta frame_flag
+
+        ; non-timing-critical work: drawing and keyboard
+        jsr read_keys
         jsr draw_header
         jsr draw_crosshairs
         jsr draw_keyboards
 
-        ; wait for raster line 251 (bottom border)
-_wait1  lda VIC_RASTER
-        cmp #251
-        bne _wait1
+        jmp main_loop
 
-        ; timing-critical: SID updates happen immediately after sync
+; =====================================================================
+; RASTER IRQ HANDLER  (timing-critical SID work, runs once per frame)
+; =====================================================================
+irq_handler
+        lda VIC_IRR
+        and #$01
+        beq _irq_skip           ; not our raster IRQ
+        sta VIC_IRR             ; ack raster IRQ
+
         jsr read_joystick
         jsr quantize
         jsr set_sid_freq
         ; fire button = temp mute (bit 4 of joy_raw, active low)
         lda joy_raw
         and #$10
-        beq _fire_mute
+        beq _irq_mute
         jsr apply_rhythm
-        jmp _fire_done
-_fire_mute
+        jmp _irq_sid
+_irq_mute
         ldx wave_idx
         lda wave_cr,x           ; gate off (no gate bit)
         sta V1_CR
@@ -208,16 +242,12 @@ _fire_mute
         sta voice_mask
         lda filt_cut            ; keep filter primed for release
         sta filt_cur
-_fire_done
+_irq_sid
         jsr set_sid_filter
-        jsr read_keys
+        inc frame_flag          ; signal main loop
 
-        ; wait until raster leaves line 251 so we don't double-trigger
-_wait2  lda VIC_RASTER
-        cmp #251
-        beq _wait2
-
-        jmp main_loop
+_irq_skip
+        jmp $ea31               ; KERNAL IRQ exit (restores regs, RTI)
 
 ; =====================================================================
 ; READ JOYSTICK PORT 2
