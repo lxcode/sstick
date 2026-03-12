@@ -1976,8 +1976,9 @@ scale_len
 deg_shift .byte 0,   0,  0,  1,   0,    0,    1,    0
 
 ; voice 3 offset in scale degrees (a fifth where possible)
+; for scales with deg_shift>0, offset must be pre-multiplied to compensate
 ;              chrom maj min pent whole dorian mpent stud
-v3_step .byte  7,    4,  4,  3,   3,    4,    3,    6
+v3_step .byte  7,    4,  4,  6,   3,    4,    6,    6
 
 ; note name display: character and color per semitone (0-11)
 ; always show note letter; flats shown as dark version of note above
@@ -1986,8 +1987,9 @@ note_chr .byte $03, $04, $04, $05, $05, $06, $07, $07, $01, $01, $02, $02
 note_clr .byte $01, $0b, $01, $0b, $01, $01, $0b, $01, $0b, $01, $0b, $01
 
 ; voice 4 offset in scale degrees (a third where possible)
+; for scales with deg_shift>0, offset must be pre-multiplied to compensate
 ;              chrom maj min pent whole dorian mpent stud
-v4_step .byte  4,    2,  2,  1,   2,    2,    1,    4
+v4_step .byte  4,    2,  2,  4,   2,    2,    4,    4
 
 scale_ptr_lo
         .byte <sc_chrom, <sc_major, <sc_minor
