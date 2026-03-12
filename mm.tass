@@ -10,19 +10,22 @@
 ;
 ; Controls:
 ;   Joystick 2    Move through pitch space
+;   Fire          Hold to mute, release to resume
 ;   Space         Toggle sound on/off
-;   1-6           Select scale (chromatic/major/minor/pentatonic/wholetone/dorian)
-;   W / S         Cycle waveform forward / backward
+;   1-7           Select scale (chromatic/major/minor/penta/wholetone/dorian/min penta)
+;   W             Cycle waveform
 ;   Q / E         Voice 3 octave down / up
 ;   , / .         Filter cutoff down / up
 ;   F             Toggle filter
 ;   R             Toggle envelope retrigger
+;   A             Toggle 4th voice arpeggio
+;   C             Toggle contrary motion
 ; =====================================================================
 
 ; ----- zero page variables -----
 pos_x       = $02      ; cursor column (0-39)
-pos_y       = $03      ; cursor row in play area (0-22, maps to screen rows 2-24)
-cur_scale   = $04      ; scale index 0-5
+pos_y       = $03      ; cursor row in play area (0-21, maps to screen rows 2-23)
+cur_scale   = $04      ; scale index 0-6
 wave_idx    = $05      ; waveform index 0-3
 sounding    = $06      ; 1 = gates open, 0 = gates closed
 v3_oct      = $07      ; voice 3 semitone offset: 0, +12, or -12 (signed)
@@ -39,6 +42,12 @@ prev_v3scr  = $11      ; previous frame's v3_scr
 retrig      = $12      ; envelope retrigger mode (1=on, 0=off)
 rt_count    = $13      ; frames remaining in gate-off period (0=idle)
 filt_cur    = $14      ; current filter cutoff (decays from filt_cut in retrig mode)
+v4_note     = $15      ; voice 4 semitone index (arpeggiated on V3)
+v4_scr      = $16      ; voice 4 play-area row (0-22) or $ff if off-screen
+prev_v4scr  = $17      ; previous frame's v4_scr
+arp_on      = $18      ; arpeggio enable flag (1=V3 alternates v3/v4 notes)
+arp_tog     = $19      ; arpeggio frame toggle (0 or 1)
+contrary    = $1a      ; contrary motion (1=V2/V3 move opposite to V1)
 ptr_lo      = $fb      ; indirect pointer lo
 ptr_hi      = $fc      ; indirect pointer hi
 prev_x      = $fd      ; previous cursor X (for erase)
@@ -112,9 +121,11 @@ entry
         ; -- init state --
         lda #20
         sta pos_x
-        sta prev_x
         lda #11
         sta pos_y
+        lda #19
+        sta prev_x
+        lda #10
         sta prev_y
 
         lda #1                  ; major scale
@@ -129,12 +140,16 @@ entry
         sta retrig
         sta rt_count
         sta filt_cur
+        sta arp_on
+        sta arp_tog
+        sta contrary
         lda #$50
         sta filt_cut
         lda #0
         sta move_tmr
         lda #$ff
         sta prev_v3scr
+        sta prev_v4scr
 
         jsr sid_init
         jsr draw_header
@@ -154,11 +169,31 @@ _wait1  lda VIC_RASTER
         jsr read_joystick
         jsr quantize
         jsr set_sid_freq
+        ; fire button = temp mute (bit 4 of joy_raw, active low)
+        lda joy_raw
+        and #$10
+        beq _fire_mute
+        ; fire not held: normal processing
         jsr retrigger_gates
+        ; ensure gates match sounding state (handles fire release)
+        lda rt_count
+        bne _fire_done          ; don't interfere with retrig countdown
+        jsr set_gates
+        jmp _fire_done
+_fire_mute
+        ldx wave_idx
+        lda wave_cr,x           ; gate off (no gate bit)
+        sta V1_CR
+        sta V2_CR
+        sta V3_CR
+        lda filt_cut            ; keep filter primed for release
+        sta filt_cur
+_fire_done
         jsr set_sid_filter
         jsr read_keys
         jsr draw_header
         jsr draw_crosshairs
+        jsr draw_keyboards
 
         ; wait until raster leaves line 251 so we don't double-trigger
 _wait2  lda VIC_RASTER
@@ -201,7 +236,7 @@ _no_up
         lsr a
         bcs _no_down
         lda pos_y
-        cmp #22
+        cmp #21
         beq _no_down
         inc pos_y
 _no_down
@@ -223,7 +258,7 @@ _no_left
         lsr a
         bcs _no_right
         lda pos_x
-        cmp #39
+        cmp #38
         beq _no_right
         inc pos_x
 _no_right
@@ -249,19 +284,25 @@ quantize
         jsr degree_to_semi
         sta v1_note
 
-        ; voice 2: Y position inverted (0=bottom=low, 22=top=high)
-        lda #22
+        ; voice 2: Y position -> scale degree
+        ; normal: invert Y (up=high pitch); contrary: Y direct (diverges from V3/V4)
+        lda contrary
+        bne _v2_cont
+        lda #21
         sec
         sbc pos_y
+        jmp _v2_quant
+_v2_cont
+        lda pos_y
+_v2_quant
         jsr degree_to_semi
         sta v2_note
 
         ; voice 3: Y position + scale-degree offset (a fifth in most scales)
-        ; This matches Spiegel's original: voice offsets are in scale steps,
-        ; not semitones, so voice 3 is always in-scale.
-        lda #22
+        ; always uses inverted Y; in contrary mode this diverges from V2
+        lda #21
         sec
-        sbc pos_y               ; invert Y (same as voice 2)
+        sbc pos_y
         clc
         ldx cur_scale
         adc v3_step,x           ; add per-scale degree offset
@@ -278,16 +319,44 @@ _v3_pos
         lda #71
 _v3_store
         sta v3_note
+
+        ; voice 4: Y position + scale-degree offset (a third)
+        ; always uses inverted Y; in contrary mode this diverges from V2
+        lda #21
+        sec
+        sbc pos_y
+        clc
+        ldx cur_scale
+        adc v4_step,x
+        jsr degree_to_semi
+        clc
+        adc v3_oct
+        bpl _v4_pos
+        lda #0
+        jmp _v4_store
+_v4_pos
+        cmp #72
+        bcc _v4_store
+        lda #71
+_v4_store
+        sta v4_note
         rts
 
 ; --- convert a scale degree (0-39) to a semitone index (0-71) ---
 ; input:  A = degree
 ; output: A = semitone index
 degree_to_semi
+        ; compress degree range for sparser scales
+        ldx cur_scale
+        ldy deg_shift,x
+        beq _no_dshift
+_dshift lsr a
+        dey
+        bne _dshift
+_no_dshift
         sta tmp
 
         ; load pointer to current scale interval table
-        ldx cur_scale
         lda scale_ptr_lo,x
         sta ptr_lo
         lda scale_ptr_hi,x
@@ -351,9 +420,18 @@ set_sid_freq
         lda freq_tbl+1,x
         sta V2_FHI
 
-        ; voice 3
+        ; voice 3 (with optional arpeggio to voice 4)
+        lda arp_on
+        beq _v3_plain
+        lda arp_tog
+        eor #$01
+        sta arp_tog
+        beq _v3_plain           ; toggle=0: play v3_note
+        lda v4_note             ; toggle=1: play v4_note
+        jmp _v3_set
+_v3_plain
         lda v3_note
-        asl a
+_v3_set asl a
         tax
         lda freq_tbl,x
         sta V3_FLO
@@ -522,7 +600,7 @@ _has_key
         ; --- scale selection: '1'..'6' ---
         cmp #$31                ; '1'
         bcc _not_num
-        cmp #$37                ; '7'
+        cmp #$38                ; '8'
         bcs _not_num
         sec
         sbc #$31
@@ -531,7 +609,7 @@ _has_key
         rts
 _not_num
 
-        ; --- W: next waveform ---
+        ; --- W: cycle waveform ---
         cmp #$57
         bne _not_w
         ldx wave_idx
@@ -543,18 +621,6 @@ _w_ok   stx wave_idx
         jsr set_gates
         rts
 _not_w
-
-        ; --- S: prev waveform ---
-        cmp #$53
-        bne _not_s
-        ldx wave_idx
-        dex
-        bpl _s_ok
-        ldx #3
-_s_ok   stx wave_idx
-        jsr set_gates
-        rts
-_not_s
 
         ; --- Q: voice 3 octave down ---
         cmp #$51
@@ -658,6 +724,24 @@ _r_drone
         rts
 _not_r
 
+        ; --- A: toggle arpeggio (4th voice) ---
+        cmp #$41
+        bne _not_a
+        lda arp_on
+        eor #$01
+        sta arp_on
+        rts
+_not_a
+
+        ; --- C: toggle contrary motion ---
+        cmp #$43
+        bne _not_d
+        lda contrary
+        eor #$01
+        sta contrary
+        rts
+_not_d
+
         ; --- SPACE: toggle sound ---
         cmp #$20
         bne _key_done
@@ -747,52 +831,57 @@ _hdr_filt
         sta SCREEN+24
         lda filt_on
         beq _hdr_foff
-        lda #$0f                ; 'O'
+        lda #$a0                ; inverse space (filled block)
         sta SCREEN+25
-        lda #$0e                ; 'N'
-        sta SCREEN+26
-        lda #$20
-        sta SCREEN+27
-        jmp _hdr_snd
-_hdr_foff
-        lda #$2d                ; '-'
-        sta SCREEN+25
-        sta SCREEN+26
-        lda #$20
-        sta SCREEN+27
-
-_hdr_snd
-        ; sound state at column 29
-        lda sounding
-        beq _hdr_mute
-        lda #$a0                ; inverse space = filled block
-        sta SCREEN+29
         jmp _hdr_retrig
-_hdr_mute
-        lda #$20
-        sta SCREEN+29
+_hdr_foff
+        lda #$20                ; space (blank)
+        sta SCREEN+25
 
 _hdr_retrig
-        ; retrigger state at column 31
+        ; retrigger state at column 27
         lda #$12                ; 'R' screen code
+        sta SCREEN+27
+        lda #$3a                ; ':'
+        sta SCREEN+28
+        lda retrig
+        beq _hdr_roff
+        lda #$a0                ; inverse space (filled block)
+        sta SCREEN+29
+        jmp _hdr_arp
+_hdr_roff
+        lda #$20                ; space (blank)
+        sta SCREEN+29
+
+_hdr_arp
+        ; arpeggio state at column 31
+        lda #$01                ; 'A' screen code
         sta SCREEN+31
         lda #$3a                ; ':'
         sta SCREEN+32
-        lda retrig
-        beq _hdr_roff
-        lda #$0f                ; 'O'
+        lda arp_on
+        beq _hdr_aoff
+        lda #$a0                ; inverse space (filled block)
         sta SCREEN+33
-        lda #$0e                ; 'N'
-        sta SCREEN+34
-        lda #$20
+        jmp _hdr_cont
+_hdr_aoff
+        lda #$20                ; space (blank)
+        sta SCREEN+33
+
+_hdr_cont
+        ; contrary motion state at column 35
+        lda #$03                ; 'C' screen code
         sta SCREEN+35
+        lda #$3a                ; ':'
+        sta SCREEN+36
+        lda contrary
+        beq _hdr_coff
+        lda #$a0                ; inverse space (filled block)
+        sta SCREEN+37
         jmp _hdr_sep
-_hdr_roff
-        lda #$2d                ; '-'
-        sta SCREEN+33
-        sta SCREEN+34
-        lda #$20
-        sta SCREEN+35
+_hdr_coff
+        lda #$20                ; space (blank)
+        sta SCREEN+37
 
 _hdr_sep
         ; row 1: thin separator
@@ -813,18 +902,64 @@ _hcol   sta COLRAM,x
 
 ; --- draw crosshair lines for all three voices ---
 draw_crosshairs
-        ; compute voice 3 screen row: pos_y - v3_step (higher pitch = lower row)
+        ; compute voice 3 screen row
+        ; normal: pos_y - v3_step (V3 above cursor, moves with it)
+        ; contrary: (21 - pos_y) - v3_step (V3 mirrors, moves opposite)
         ldx cur_scale
+        lda contrary
+        bne _v3_mir
         lda pos_y
+        jmp _v3_sub
+_v3_mir lda #21
         sec
+        sbc pos_y
+_v3_sub sec
         sbc v3_step,x
-        bcc _v3_off             ; negative = off top of screen
+        bcc _v3_off             ; negative = off screen
+        cmp #22
+        bcs _v3_off             ; > 21 = off screen
         sta v3_scr
         jmp _v3_done
 _v3_off lda #$ff
         sta v3_scr
 _v3_done
 
+        ; compute voice 4 screen row (same contrary logic)
+        ldx cur_scale
+        lda contrary
+        bne _v4_mir
+        lda pos_y
+        jmp _v4_sub
+_v4_mir lda #21
+        sec
+        sbc pos_y
+_v4_sub sec
+        sbc v4_step,x
+        bcc _v4_off
+        cmp #22
+        bcs _v4_off
+        sta v4_scr
+        jmp _v4_done
+_v4_off lda #$ff
+        sta v4_scr
+_v4_done
+
+        ; === skip erase/draw if nothing moved ===
+        lda pos_x
+        cmp prev_x
+        bne _do_draw
+        lda pos_y
+        cmp prev_y
+        bne _do_draw
+        lda v3_scr
+        cmp prev_v3scr
+        bne _do_draw
+        lda v4_scr
+        cmp prev_v4scr
+        bne _do_draw
+        jmp _skip_draw
+
+_do_draw
         ; === ERASE OLD LINES (write spaces; color doesn't matter for spaces) ===
 
         ; erase old V1 vertical at prev_x
@@ -838,6 +973,17 @@ _v3_done
         adc #2                  ; play area offset
         jsr hline_erase
 
+        ; erase old V4 horizontal at prev_v4scr (only if arp on)
+        lda arp_on
+        beq _skip_ev4
+        lda prev_v4scr
+        cmp #$ff
+        beq _skip_ev4
+        clc
+        adc #2
+        jsr hline_erase
+_skip_ev4
+
         ; erase old V3 horizontal at prev_v3scr
         lda prev_v3scr
         cmp #$ff
@@ -849,7 +995,30 @@ _skip_ev3
 
         ; === DRAW NEW LINES ===
 
-        ; draw V3 horizontal in yellow (first, so V2 overwrites at overlap)
+        ; draw V4 horizontal in purple (first, so V3/V2 overwrite at overlap)
+        lda arp_on
+        beq _skip_dv4
+        lda v4_scr
+        cmp #$ff
+        beq _skip_dv4
+        clc
+        adc #2
+        tax
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        sta ptr_hi
+        lda #$43                ; horizontal line char
+        jsr hline_fill
+        lda ptr_hi
+        clc
+        adc #($d8-$04)
+        sta ptr_hi
+        lda #$04                ; purple
+        jsr hline_fill
+_skip_dv4
+
+        ; draw V3 horizontal in yellow (so V2 overwrites at overlap)
         lda v3_scr
         cmp #$ff
         beq _skip_dv3
@@ -939,9 +1108,130 @@ _skip_dv3
         sta (ptr_lo),y
 _skip_xv3
 
+        ; V1 x V4 at (v4_scr+2, pos_x) if visible and arp on
+        lda arp_on
+        beq _skip_xv4
+        lda v4_scr
+        cmp #$ff
+        beq _skip_xv4
+        clc
+        adc #2
+        tax
+        lda row_lo,x
+        sta ptr_lo
+        lda row_hi,x
+        sta ptr_hi
+        ldy pos_x
+        lda #$5b
+        sta (ptr_lo),y
+        lda ptr_hi
+        clc
+        adc #($d8-$04)
+        sta ptr_hi
+        lda #$01
+        sta (ptr_lo),y
+_skip_xv4
+
+_skip_draw
         ; update previous-frame tracking
         lda v3_scr
         sta prev_v3scr
+        lda v4_scr
+        sta prev_v4scr
+        rts
+
+; =====================================================================
+; DRAW PIANO KEYBOARD INDICATORS ON BOTH AXES
+; =====================================================================
+; X-axis: row 1 (40 columns), each column = one scale degree for V1
+; Y-axis: column 0 (23 rows), each row = one scale degree for V2
+draw_keyboards
+        ; set up scale pointer for note lookups
+        ldx cur_scale
+        lda scale_ptr_lo,x
+        sta ptr_lo
+        lda scale_ptr_hi,x
+        sta ptr_hi
+
+        ; --- X-axis: note names on row 24, columns 0-38 ---
+        ldx #0
+_kb_x   txa
+        pha                     ; save column
+        ; degree mod scale_len -> step in scale
+        ldy cur_scale
+_kb_xd  cmp scale_len,y
+        bcc _kb_xm
+        sec
+        sbc scale_len,y
+        jmp _kb_xd
+_kb_xm  tay
+        lda (ptr_lo),y          ; semitone 0-11
+        tay
+        pla                     ; restore column
+        tax
+        lda note_chr,y
+        sta SCREEN+24*40,x
+        lda note_clr,y
+        sta COLRAM+24*40,x
+        inx
+        cpx #39
+        bne _kb_x
+
+        ; --- Y-axis: note names on column 39, rows 2-23 ---
+        lda #<(SCREEN+80+39)    ; row 2, col 39
+        sta $1b
+        lda #>(SCREEN+80+39)
+        sta $1c
+
+        ldx #21                 ; row counter (21=top row, 0=bottom)
+_kb_y   txa
+        pha                     ; save row counter
+        ; compute degree: normal = X (high at top), contrary = 21-X (low at top)
+        lda contrary
+        beq _kb_ynrm
+        stx tmp
+        lda #21
+        sec
+        sbc tmp                 ; A = 21 - X
+        jmp _kb_ymod
+_kb_ynrm
+        txa                     ; A = X
+_kb_ymod
+        ldy cur_scale
+_kb_yd  cmp scale_len,y
+        bcc _kb_ym
+        sec
+        sbc scale_len,y
+        jmp _kb_yd
+_kb_ym  tay
+        lda (ptr_lo),y          ; semitone 0-11
+        tax                     ; X = semitone
+        ; write character
+        lda note_chr,x
+        ldy #0
+        sta ($1b),y
+        ; write color (temporarily adjust hi byte for color RAM)
+        lda $1c
+        pha
+        clc
+        adc #($d8-$04)
+        sta $1c
+        lda note_clr,x
+        sta ($1b),y
+        pla
+        sta $1c
+        ; advance pointer by 40
+        lda $1b
+        clc
+        adc #40
+        sta $1b
+        bcc +
+        inc $1c
++
+        pla                     ; restore degree
+        tax
+        dex
+        bpl _kb_y
         rts
 
 ; --- fill a screen row with spaces ---
@@ -955,9 +1245,9 @@ hline_erase
         lda #$20                ; space
         ; fall through
 
-; --- fill 40 columns at ptr with character in A ---
+; --- fill 39 columns (0-38) at ptr with character in A ---
 hline_fill
-        ldy #39
+        ldy #38
 _hfl    sta (ptr_lo),y
         dey
         bpl _hfl
@@ -965,14 +1255,14 @@ _hfl    sta (ptr_lo),y
 
 ; --- fill a vertical column with a character ---
 ; input: Y = column, A = character
-; fills screen rows 2-24 (the 23-row play area)
+; fills screen rows 2-23 (the 22-row play area)
 vline_char
         sta tmp
         lda row_lo+2
         sta ptr_lo
         lda row_hi+2
         sta ptr_hi
-        ldx #23
+        ldx #22
 _vcl    lda tmp
         sta (ptr_lo),y
         lda ptr_lo
@@ -987,7 +1277,7 @@ _vcl    lda tmp
 
 ; --- fill a vertical column with a color ---
 ; input: Y = column, A = color
-; fills color RAM rows 2-24
+; fills color RAM rows 2-23
 vline_colr
         sta tmp
         lda row_lo+2
@@ -996,7 +1286,7 @@ vline_colr
         clc
         adc #($d8-$04)
         sta ptr_hi
-        ldx #23
+        ldx #22
 _vrl    lda tmp
         sta (ptr_lo),y
         lda ptr_lo
@@ -1139,20 +1429,35 @@ sc_minor  .byte 0,2,3,5,7,8,10
 sc_penta  .byte 0,2,4,7,9
 sc_whole  .byte 0,2,4,6,8,10
 sc_dorian .byte 0,2,3,5,7,9,10
+sc_mpent  .byte 0,3,5,7,10
 
 scale_len
-        .byte 12, 7, 7, 5, 6, 7
+        .byte 12, 7, 7, 5, 6, 7, 5
+
+; degree right-shift to normalize pitch range for sparser scales
+;              chrom maj min pent whole dorian mpent
+deg_shift .byte 0,   0,  0,  1,   0,    0,    1
 
 ; voice 3 offset in scale degrees (a fifth where possible)
-;              chrom maj min pent whole dorian
-v3_step .byte  7,    4,  4,  3,   3,    4
+;              chrom maj min pent whole dorian mpent
+v3_step .byte  7,    4,  4,  3,   3,    4,    3
+
+; note name display: character and color per semitone (0-11)
+; always show note letter; flats shown as dark version of note above
+;              C    Db   D    Eb   E    F    Gb   G    Ab   A    Bb   B
+note_chr .byte $03, $04, $04, $05, $05, $06, $07, $07, $01, $01, $02, $02
+note_clr .byte $01, $0b, $01, $0b, $01, $01, $0b, $01, $0b, $01, $0b, $01
+
+; voice 4 offset in scale degrees (a third where possible)
+;              chrom maj min pent whole dorian mpent
+v4_step .byte  4,    2,  2,  1,   2,    2,    1
 
 scale_ptr_lo
         .byte <sc_chrom, <sc_major, <sc_minor
-        .byte <sc_penta, <sc_whole, <sc_dorian
+        .byte <sc_penta, <sc_whole, <sc_dorian, <sc_mpent
 scale_ptr_hi
         .byte >sc_chrom, >sc_major, >sc_minor
-        .byte >sc_penta, >sc_whole, >sc_dorian
+        .byte >sc_penta, >sc_whole, >sc_dorian, >sc_mpent
 
 ; --- scale names (screen codes, $ff terminated, padded to 9 chars) ---
 sn_chr  .text "CHROMATIC"
@@ -1167,26 +1472,34 @@ sn_whl  .text "WHOLETONE"
         .byte $ff
 sn_dor  .text "DORIAN   "
         .byte $ff
+sn_mpen .text "MIN PENTA"
+        .byte $ff
         .enc "none"
 
 ; --- intro screen string data ---
 ; format: [row, col, text..., $00] ... $ff
         .enc "screen"
 intro_data
-        .byte 6, 14
+        .byte 1, 14
         .text "MANIC MOUSE"
         .byte $00
-        .byte 4, 7
+        .byte 3, 7
         .text "INSPIRED BY LAURIE SPIEGEL"
         .byte $00
-        .byte 6, 3
+        .byte 5, 3
         .text "CONTROLS"
         .byte $00
-        .byte 8, 3
+        .byte 7, 3
         .text "JOYSTICK"
         .byte $00
-        .byte 8, 20
+        .byte 7, 20
         .text "MOVE CURSOR"
+        .byte $00
+        .byte 8, 3
+        .text "FIRE"
+        .byte $00
+        .byte 8, 20
+        .text "HOLD TO MUTE"
         .byte $00
         .byte 9, 3
         .text "SPACE"
@@ -1195,13 +1508,13 @@ intro_data
         .text "TOGGLE SOUND"
         .byte $00
         .byte 10, 3
-        .text "1-6"
+        .text "1-7"
         .byte $00
         .byte 10, 20
         .text "SELECT SCALE"
         .byte $00
         .byte 11, 3
-        .text "W / S"
+        .text "W"
         .byte $00
         .byte 11, 20
         .text "CYCLE WAVEFORM"
@@ -1230,28 +1543,43 @@ intro_data
         .byte 15, 20
         .text "ENVELOPE RETRIG"
         .byte $00
+        .byte 16, 3
+        .text "A"
+        .byte $00
+        .byte 16, 20
+        .text "4TH VOICE ARPEGGIO"
+        .byte $00
         .byte 17, 3
-        .text "SCALES"
+        .text "C"
         .byte $00
-        .byte 18, 3
-        .text "1 CHROMATIC"
-        .byte $00
-        .byte 18, 20
-        .text "2 MAJOR"
+        .byte 17, 20
+        .text "CONTRARY MOTION"
         .byte $00
         .byte 19, 3
-        .text "3 MINOR"
-        .byte $00
-        .byte 19, 20
-        .text "4 PENTATONIC"
+        .text "SCALES"
         .byte $00
         .byte 20, 3
-        .text "5 WHOLETONE"
+        .text "1 CHROMATIC"
         .byte $00
         .byte 20, 20
+        .text "2 MAJOR"
+        .byte $00
+        .byte 21, 3
+        .text "3 MINOR"
+        .byte $00
+        .byte 21, 20
+        .text "4 PENTATONIC"
+        .byte $00
+        .byte 22, 3
+        .text "5 WHOLETONE"
+        .byte $00
+        .byte 22, 20
         .text "6 DORIAN"
         .byte $00
-        .byte 23, 10
+        .byte 23, 3
+        .text "7 MIN PENTATONIC"
+        .byte $00
+        .byte 24, 10
         .text "PRESS SPACE TO BEGIN"
         .byte $00
         .byte $ff
@@ -1261,10 +1589,10 @@ intro_data
 ; format: [row, color] ... $ff
 intro_clr
         .byte 1, $01            ; white
-        .byte 2, $01            ; white
-        .byte 4, $0c            ; mid gray
-        .byte 6, $0d            ; light green
-        .byte 8, $0e            ; light blue
+        .byte 3, $0c            ; mid gray
+        .byte 5, $0d            ; light green
+        .byte 7, $0e            ; light blue
+        .byte 8, $0e
         .byte 9, $0e
         .byte 10, $0e
         .byte 11, $0e
@@ -1272,19 +1600,22 @@ intro_clr
         .byte 13, $0e
         .byte 14, $0e
         .byte 15, $0e
-        .byte 17, $0d           ; light green
-        .byte 18, $0e           ; light blue
-        .byte 19, $0e
-        .byte 20, $0e
-        .byte 23, $07           ; yellow
+        .byte 16, $0e
+        .byte 17, $0e
+        .byte 19, $0d           ; light green
+        .byte 20, $0e           ; light blue
+        .byte 21, $0e
+        .byte 22, $0e
+        .byte 23, $0e
+        .byte 24, $07           ; yellow
         .byte $ff
 
 sname_ptr_lo
         .byte <sn_chr, <sn_maj, <sn_min
-        .byte <sn_pen, <sn_whl, <sn_dor
+        .byte <sn_pen, <sn_whl, <sn_dor, <sn_mpen
 sname_ptr_hi
         .byte >sn_chr, >sn_maj, >sn_min
-        .byte >sn_pen, >sn_whl, >sn_dor
+        .byte >sn_pen, >sn_whl, >sn_dor, >sn_mpen
 
 ; --- screen row address tables (rows 0-24) ---
 row_lo
