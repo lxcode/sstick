@@ -62,6 +62,7 @@ frame_flag  = $24      ; set by IRQ, cleared by main loop
 on_beat     = $25      ; set by apply_rhythm on beat tick frames
 moving      = $26      ; 1 if cursor moved since last beat tick
 blink_tmr   = $27      ; frames remaining for voice blink (white flash)
+arp_count   = $28      ; frame counter for arp toggle rate
 ptr_lo      = $fb      ; indirect pointer lo
 ptr_hi      = $fc      ; indirect pointer hi
 prev_x      = $fd      ; previous cursor X (for erase)
@@ -156,6 +157,8 @@ entry
         sta contrary
         lda #1
         sta arp_on
+        lda #ARP_RATE
+        sta arp_count
         lda #$50
         sta filt_cut
         lda #0
@@ -251,9 +254,7 @@ _irq_mute
         lda filt_cut
         sta filt_cur
 _irq_post
-        ; V3 arp toggle runs on beat ticks to alternate at tempo rate
-        lda on_beat
-        beq _irq_filt
+        ; V3 arp toggle runs every frame for rapid C64-style arpeggio
         jsr update_v3_arp
 _irq_filt
         jsr set_sid_filter
@@ -516,9 +517,14 @@ set_sid_freq
         rts
 
 ; --- update V3 frequency for arpeggio toggle (runs every frame) ---
+ARP_RATE = 4            ; toggle every N frames
 update_v3_arp
         lda arp_on
         beq _va_done
+        dec arp_count
+        bne _va_done
+        lda #ARP_RATE
+        sta arp_count
         lda arp_tog
         eor #$01
         sta arp_tog
