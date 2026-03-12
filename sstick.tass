@@ -912,7 +912,7 @@ _szero  sta SID,x
         bpl _szero
 
         ; ADSR: slow attack, mid decay, high sustain, slow release
-        lda #$69
+        lda #$09
         sta V1_AD
         sta V2_AD
         sta V3_AD
@@ -1063,7 +1063,7 @@ _r_drone
         sta V2_CR
         sta V3_CR
         ; retrig off: sustained ADSR for all modes
-        lda #$69
+        lda #$09
         sta V1_AD
         sta V2_AD
         sta V3_AD
@@ -1110,7 +1110,7 @@ _f1_sustain
         sta V1_CR
         sta V2_CR
         sta V3_CR
-        lda #$69
+        lda #$09
         sta V1_AD
         sta V2_AD
         sta V3_AD
@@ -1193,7 +1193,7 @@ _rhy_set
         ; set ADSR based on retrig state: retrig on = percussive, off = sustained
         lda retrig
         bne _rhy_perc
-        lda #$69
+        lda #$09
         sta V1_AD
         sta V2_AD
         sta V3_AD
